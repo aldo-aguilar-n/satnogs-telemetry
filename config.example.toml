@@ -1,0 +1,40 @@
+# Example configuration for satnogs-telemetry.
+
+# Directory that will hold one SQLite database per NORAD ID.
+db_dir = "data"
+
+# SatNOGS telemetry API base URL.
+satnogs_base_url = "https://db.satnogs.org/api/telemetry/"
+
+# HTTP timeout in seconds.
+request_timeout_s = 60
+
+# Source label stored with raw packets.
+source_name = "satnogs_db"
+
+# Decoder lookup is satellite-scoped.
+# Matching priority is:
+# 1. NORAD ID
+# 2. transmitter if present in both config and raw packet
+# 3. sat_id if present in both config and raw packet
+# Then APID decoder selection happens inside that satellite entry.
+
+[[satellites]]
+norad_cat_id = 98338
+frame_protocol = "ax25_ccsds"
+# transmitter = "optional-transmitter-uuid"
+# sat_id = "optional-sat-id"
+
+  [[satellites.apid_decoders]]
+  apid = 291
+  type = "python"
+  parser_path = "external/satnogs-decoders/python/example_decoder.py"
+  root_class = "ExampleDecoder"
+  strip_ccsds_primary_header = false
+
+  [[satellites.apid_decoders]]
+  apid = 292
+  type = "ksy"
+  ksy_path = "external/satnogs-decoders/ksy/example_decoder.ksy"
+  root_class = "ExampleDecoder"
+  strip_ccsds_primary_header = false

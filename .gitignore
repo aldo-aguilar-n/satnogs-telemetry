@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.ruff_cache/
+.pytest_cache/
+.generated/
+data/*.sqlite3
+plots/*.png
+config.toml

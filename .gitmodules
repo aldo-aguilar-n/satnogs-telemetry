@@ -1,0 +1,3 @@
+[submodule "external/satnogs-decoders"]
+	path = external/satnogs-decoders
+	url = https://gitlab.com/librespacefoundation/satnogs/satnogs-decoders.git
