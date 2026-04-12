@@ -17,6 +17,7 @@ Headless SatNOGS telemetry downloader, parser, and per-satellite SQLite store.
   - raw CCSDS packet
   - optional parsed packet if a decoder is configured and succeeds
 - Uses decoders from the `satnogs-decoders` Git submodule.
+- Compiles the selected `.ksy` decoder on first use and caches it locally.
 - Saves plots in headless mode as PNG files.
 
 ## Per-satellite database layout
@@ -33,14 +34,14 @@ data/
 
 This project is designed to work with `satnogs-decoders` as a Git submodule.
 
-Recommended lookup strategy:
+Current decoder behavior:
 
-1. NORAD ID
-2. transmitter UUID if available
-3. SatNOGS `sat_id` if available
-4. CCSDS APID
-
-A decoder is resolved from `config.toml`.
+- The app uses **one decoder per satellite**, selected by **NORAD ID**.
+- The same decoder may parse multiple APIDs for that satellite.
+- APID is still extracted and stored, but is **not** used to choose the decoder.
+- On first parse of an unknown satellite, the app will prompt the user to choose a `.ksy` decoder from the existing `satnogs-decoders` submodule.
+- That decoder choice is saved in `config.toml`.
+- The `.ksy` is compiled on first use and cached locally for later parses.
 
 ## Quick start
 
@@ -50,88 +51,142 @@ A decoder is resolved from `config.toml`.
 poetry install
 ```
 
-### 2. Add the SatNOGS decoders submodule
+### 2. Create a local `.env` file for the SatNOGS token
 
-If this repo is already a Git repo:
+Create a file named `.env` in the project root:
 
-```bash
-git submodule add https://gitlab.com/librespacefoundation/satnogs/satnogs-decoders.git external/satnogs-decoders
-git submodule update --init --recursive
+```text
+SATNOGS_API_TOKEN=your_db_token_here
 ```
 
-Or use the helper script after `git init`:
+This project uses `python-dotenv`, so the token is loaded automatically from `.env` when the app starts.
 
-```bash
-bash scripts/init_submodule.sh
+### 3. Add `.env` to `.gitignore`
+
+Make sure `.gitignore` contains:
+
+```text
+.env
 ```
 
-### 3. Copy and edit the config file
+### 4. Install Kaitai Struct Compiler
 
-```bash
-cp config.example.toml config.toml
+Poetry installs the **Python runtime** package `kaitaistruct`, but this project also needs the separate command-line compiler `kaitai-struct-compiler` to turn `.ksy` files into Python parsers.
+
+On Windows, install Kaitai Struct Compiler by downloading the official compiler release or Windows package, then extract/install it somewhere on your machine.
+
+A common location looks like:
+
+```text
+C:\Program Files (x86)\kaitai-struct-compiler\
 ```
 
-### 4. Initialize the DB for a satellite
+### 5. Point `config.toml` to the compiler
 
-```bash
-poetry run satnogs-telemetry init-db --norad 98338
+Set `ksc_bin` under `[app]` to the full path of the compiler launcher.
+
+Example:
+
+```toml
+[app]
+db_dir = "data"
+satnogs_base_url = "https://db.satnogs.org/api/telemetry/"
+request_timeout_s = 60
+source_name = "satnogs_db"
+satnogs_decoders_dir = "tools/satnogs-decoders"
+generated_decoders_dir = "decoders"
+ksc_bin = "C:/Program Files (x86)/kaitai-struct-compiler/bin/kaitai-struct-compiler.bat"
 ```
 
-### 5. Download raw telemetry
+Use forward slashes in TOML paths on Windows.
 
-```bash
-poetry run satnogs-telemetry sync-raw-latest --norad 98338 --config config.toml
+### 6. Verify the compiler path
+
+In Command Prompt:
+
+```bat
+where kaitai-struct-compiler
+where kaitai-struct-compiler.bat
 ```
 
-### 6. Parse everything still unparsed
+If those commands return a full path, use that path in `config.toml`.
 
-```bash
-poetry run satnogs-telemetry parse-unparsed --norad 98338 --config config.toml
+You can also test the configured compiler directly:
+
+```bat
+"C:\Program Files (x86)\kaitai-struct-compiler\bin\kaitai-struct-compiler.bat" --version
 ```
 
-### 7. Inspect parsed rows
+If that prints a version, the path is valid and the app should be able to invoke the compiler.
+
+### 7. Run the app for a satellite
 
 ```bash
-poetry run satnogs-telemetry show-recent-parsed --norad 98338 --limit 5
+poetry run satnogs-telemetry --norad 98338
 ```
 
-### 8. List decoded numeric fields
+On first run, this will:
 
-```bash
-poetry run satnogs-telemetry list-fields --norad 98338
+- create `data/98338.sqlite3` if it does not exist
+- initialize the schema
+- ask you to choose a decoder for satellite `98338` if none is configured yet
+- save that decoder selection in `config.toml`
+- download the latest raw telemetry
+- parse all unparsed rows
+
+On later runs, the same command will:
+
+- reuse the existing database
+- reuse the saved decoder
+- download only new raw telemetry
+- parse only new rows
+
+## `.env` file
+
+Example:
+
+```env
+SATNOGS_API_TOKEN=your_db_token_here
 ```
 
-### 9. Plot one field
+Important:
 
-```bash
-poetry run satnogs-telemetry plot --norad 98338 --field eps.battery_voltage --output plots/battery_voltage.png
-```
+- use the **SatNOGS DB API token**
+- keep `.env` local only
+- do **not** commit `.env` to Git
 
 ## Config file format
 
 See `config.example.toml`.
 
-The main decoder settings are under `[[satellites]]`.
+Main runtime settings live under `[app]`.
 
-Each satellite entry can specify:
+Satellite decoder mappings live under:
 
-- `norad_cat_id`
-- optional `transmitter`
-- optional `sat_id`
-- `frame_protocol` (currently `ax25_ccsds`)
-- zero or more `[[satellites.apid_decoders]]` entries
+```toml
+[satellites.98338.decoder]
+ksy_path = "ksy/cosmo.ksy"
+root_class = "Cosmo"
+```
 
-Each APID decoder can be one of:
+### Main config fields
 
-- `type = "python"` using a generated Python decoder or helper module
-- `type = "ksy"` using a `.ksy` file compiled with `ksc`
+Under `[app]`:
 
-Optional fields:
+- `db_dir`
+- `satnogs_base_url`
+- `request_timeout_s`
+- `source_name`
+- `satnogs_decoders_dir`
+- `generated_decoders_dir`
+- `ksc_bin`
 
-- `strip_ccsds_primary_header = true` if the decoder expects only the payload after the 6-byte CCSDS primary header
-- `parser_path` for Python module decoder
-- `root_class` for Python/Kaitai parser root class
-- `ksy_path` for Kaitai schema path
+### Satellite decoder fields
+
+Under `[satellites.<norad>.decoder]`:
+
+- `ksy_path` = path to `.ksy` relative to the `satnogs-decoders` submodule root
+- `root_class` = root class name to use from the generated Python parser
 
 ## Important assumptions
 
@@ -141,23 +196,29 @@ This starter project assumes:
 - the AX.25 information field contains a CCSDS packet
 - CCSDS primary header is the standard 6-byte primary header
 
-If a specific mission differs from that, adapt `utils.extract_ax25_and_ccsds()` and/or the decoder config.
+If a specific mission differs from that, adapt `utils.extract_ax25_and_ccsds()` and/or the satellite decoder config.
 
 ## Command summary
 
-Initialize database:
+### Default end-to-end run
+
+```bash
+poetry run satnogs-telemetry --norad 98338
+```
+
+### Initialize database only
 
 ```bash
 poetry run satnogs-telemetry init-db --norad 98338
 ```
 
-Download raw packets newer than the most recent stored row:
+### Download raw packets newer than the most recent stored row
 
 ```bash
 poetry run satnogs-telemetry sync-raw-latest --norad 98338 --config config.toml
 ```
 
-Download raw packets in a range:
+### Download raw packets in a range
 
 ```bash
 poetry run satnogs-telemetry sync-raw-range \
@@ -167,31 +228,31 @@ poetry run satnogs-telemetry sync-raw-range \
   --config config.toml
 ```
 
-Parse stored raw rows that do not yet have parsed rows:
+### Parse stored raw rows that do not yet have parsed rows
 
 ```bash
 poetry run satnogs-telemetry parse-unparsed --norad 98338 --config config.toml
 ```
 
-Show recent raw rows:
+### Show recent raw rows
 
 ```bash
 poetry run satnogs-telemetry show-recent-raw --norad 98338 --limit 5
 ```
 
-Show recent parsed rows:
+### Show recent parsed rows
 
 ```bash
 poetry run satnogs-telemetry show-recent-parsed --norad 98338 --limit 5
 ```
 
-List decoded numeric fields:
+### List decoded numeric fields
 
 ```bash
 poetry run satnogs-telemetry list-fields --norad 98338
 ```
 
-Plot one decoded field:
+### Plot one decoded field
 
 ```bash
 poetry run satnogs-telemetry plot \
@@ -199,3 +260,31 @@ poetry run satnogs-telemetry plot \
   --field eps.battery_voltage \
   --output plots/eps_battery_voltage.png
 ```
+
+## Decoder compilation and caching
+
+When the app needs a decoder for the first time:
+
+- it compiles the selected `.ksy` using `kaitai-struct-compiler`
+- it stores the generated Python decoder under `decoders/`
+- it reuses that compiled decoder on future runs
+- if the source `.ksy` changes later, it recompiles automatically
+
+Typical cache layout:
+
+```text
+decoders/
+  98338/
+    satellite_decoder/
+      some_decoder.py
+      .buildinfo.json
+```
+
+## Notes
+
+- Raw SatNOGS packets are stored unchanged.
+- Metadata trimming happens during the parse stage, not ingest.
+- AX.25 and CCSDS metadata are stored even if payload decoding fails.
+- A satellite decoder may successfully parse multiple APIDs.
+- Some packets may still fail payload decode even when the decoder is correct.
+- This is expected and does not prevent storage of the extracted metadata.

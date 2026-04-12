@@ -19,25 +19,34 @@ from .utils import extract_raw_fields_for_indexing, utc_now_iso
 LogFunc = Callable[[str], None]
 
 
+MALFORMED_FRAME_ERRORS = (
+    "AX.25 frame is too short",
+    "AX.25 frame must contain destination and source addresses",
+    "AX.25 frame ended before address section completed",
+    "AX.25 frame has empty information field",
+    "CCSDS packet is too short to contain a primary header",
+)
+
+
 class IngestService:
     """
     High-level service for downloading raw telemetry and parsing stored rows.
-
-    This service is intended to operate on one satellite database at a time.
     """
 
     def __init__(self, config: AppConfig, db: TelemetryDB, norad_cat_id: int) -> None:
         self.config = config
         self.db = db
         self.norad_cat_id = norad_cat_id
+
         self.client = SatNOGSClient(
             base_url=config.satnogs_base_url,
             timeout_s=config.request_timeout_s,
+            api_token=config.satnogs_api_token,
         )
+
         self.packet_parser = PacketParser(config)
 
     def sync_raw_latest(self, log: LogFunc | None = None) -> SyncResult:
-        """Download and store only raw packets newer than the latest row already stored."""
         start_utc = None
         last_ts = self.db.get_last_raw_timestamp()
 
@@ -56,7 +65,6 @@ class IngestService:
         end_utc: str | None,
         log: LogFunc | None = None,
     ) -> SyncResult:
-        """Download raw SatNOGS packets and store them unchanged."""
         result = SyncResult()
 
         if log:
@@ -106,13 +114,20 @@ class IngestService:
         return result
 
     def parse_unparsed(self, log: LogFunc | None = None) -> SyncResult:
-        """Parse raw rows in this satellite DB that do not yet have parsed entries."""
+        """
+        Parse raw rows that do not yet have parsed entries.
+
+        Malformed raw rows are deleted immediately so they are not retried
+        forever. Decoder/payload failures are NOT deleted.
+        """
         result = SyncResult()
         rows = self.db.iter_unparsed_raw_rows()
         result.total_seen = len(rows)
 
         if log:
             log(f"Parsing {len(rows)} unparsed raw rows for NORAD {self.norad_cat_id}")
+
+        deleted_count = 0
 
         for idx, row in enumerate(rows, start=1):
             try:
@@ -128,10 +143,28 @@ class IngestService:
                 result.parsed_inserted += 1
 
                 if log and idx % 100 == 0:
-                    log(f"Parsed {idx}/{len(rows)} rows | inserted={result.parsed_inserted}")
+                    suffix = f" | deleted malformed={deleted_count}" if deleted_count else ""
+                    log(f"Parsed {idx}/{len(rows)} rows | inserted={result.parsed_inserted}{suffix}")
 
             except Exception as exc:
                 result.parse_errors += 1
-                result.errors.append(f"Parse row {row['id']}: {exc}")
+                err_text = str(exc)
+                err_msg = f"Parse row {row['id']}: {err_text}"
+                result.errors.append(err_msg)
+
+                if self._is_malformed_frame_error(err_text):
+                    self.db.delete_raw_packet_by_id(int(row["id"]))
+                    deleted_count += 1
+
+        if log and deleted_count:
+            log(f"Deleted {deleted_count} malformed raw rows")
 
         return result
+
+    @staticmethod
+    def _is_malformed_frame_error(err_text: str) -> bool:
+        """
+        Return True only for deterministic malformed-frame errors that are
+        safe to delete from the raw queue.
+        """
+        return any(token in err_text for token in MALFORMED_FRAME_ERRORS)

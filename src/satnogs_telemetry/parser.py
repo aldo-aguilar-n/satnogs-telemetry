@@ -5,22 +5,22 @@ This includes:
 - raw metadata extraction
 - AX.25 address extraction
 - CCSDS primary header parsing
-- optional APID-based payload decoding using satnogs-decoders
+- optional satellite-level payload decoding
+- first-use compilation of .ksy decoders
 """
 
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-import subprocess
 from typing import Any
 
 from .config import AppConfig
-from .models import DecoderSpec, ParsedPacket, SatelliteConfig
+from .decoder_manager import DecoderManager
+from .models import ParsedPacket
 from .utils import (
     extract_ax25_and_ccsds,
     extract_raw_fields_for_indexing,
-    flatten_dict,
     hex_to_bytes,
     parse_ccsds_primary_header,
 )
@@ -28,92 +28,33 @@ from .utils import (
 
 class DecoderLoader:
     """
-    Loader for APID-specific parser modules.
-
-    Supports:
-    - Python decoder modules (`type = "python"`)
-    - Kaitai `.ksy` files compiled on demand (`type = "ksy"`)
+    Loader for compiled Python parser modules.
     """
 
-    def __init__(self, build_dir: str | Path = ".generated") -> None:
+    def __init__(self) -> None:
         self._module_cache: dict[str, Any] = {}
-        self.build_dir = Path(build_dir)
-        self.build_dir.mkdir(parents=True, exist_ok=True)
 
-    def parse_with_decoder(self, spec: DecoderSpec, packet_hex: str) -> dict[str, Any]:
-        """Decode a raw packet using the configured decoder spec."""
-        data = hex_to_bytes(packet_hex)
-        if spec.strip_ccsds_primary_header:
-            if len(data) < 6:
-                raise ValueError("Packet too short to strip CCSDS primary header")
-            data = data[6:]
-
-        module = self._load_module_for_spec(spec)
-        parser_cls = getattr(module, spec.root_class, None)
+    def parse_with_decoder(
+        self,
+        parser_path: str,
+        root_class: str,
+        packet_hex: str,
+    ) -> dict[str, Any]:
+        module = self._load_module(parser_path)
+        parser_cls = getattr(module, root_class, None)
         if parser_cls is None:
-            raise AttributeError(f"Root class '{spec.root_class}' not found for decoder")
+            raise AttributeError(f"Root class '{root_class}' not found in {parser_path}")
 
-        obj = parser_cls.from_bytes(data)
-        parsed = self._to_builtin(obj)
+        obj = parser_cls.from_bytes(hex_to_bytes(packet_hex))
+        return self._to_builtin(obj)
 
-        # Flattening is handled downstream in the DB layer, but converting here
-        # ensures parser outputs are normal built-in Python objects.
-        _ = flatten_dict(parsed) if isinstance(parsed, dict) else None
-        return parsed
-
-    def _load_module_for_spec(self, spec: DecoderSpec):
-        if spec.decoder_type == "python":
-            if not spec.parser_path:
-                raise ValueError("Python decoder spec requires parser_path")
-            return self._load_module_from_path(spec.parser_path)
-
-        if spec.decoder_type == "ksy":
-            if not spec.ksy_path:
-                raise ValueError("KSY decoder spec requires ksy_path")
-            generated_py = self._compile_ksy_to_python(spec.ksy_path)
-            return self._load_module_from_path(generated_py)
-
-        raise ValueError(f"Unsupported decoder type: {spec.decoder_type}")
-
-    def _compile_ksy_to_python(self, ksy_path: str) -> str:
-        """
-        Compile a Kaitai schema into Python code using `ksc`.
-
-        The generated module is cached on disk under `.generated/`.
-        """
-        path = Path(ksy_path)
-        if not path.exists():
-            raise FileNotFoundError(f"KSY file not found: {path}")
-
-        out_dir = self.build_dir / path.stem
-        out_dir.mkdir(parents=True, exist_ok=True)
-        generated_py = out_dir / f"{path.stem}.py"
-
-        if generated_py.exists():
-            return str(generated_py)
-
-        cmd = ["ksc", "-t", "python", "-d", str(out_dir), str(path)]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "Could not find 'ksc'. Install the Kaitai Struct compiler and make sure it is on PATH."
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"ksc failed for {path}: {exc.stderr}") from exc
-
-        if not generated_py.exists():
-            raise RuntimeError(f"Expected generated parser not found: {generated_py}")
-
-        return str(generated_py)
-
-    def _load_module_from_path(self, parser_path: str):
+    def _load_module(self, parser_path: str):
         if parser_path in self._module_cache:
             return self._module_cache[parser_path]
 
         path = Path(parser_path)
         if not path.exists():
-            raise FileNotFoundError(f"Decoder file not found: {path}")
+            raise FileNotFoundError(f"Compiled decoder file not found: {path}")
 
         spec = importlib.util.spec_from_file_location(path.stem, path)
         if spec is None or spec.loader is None:
@@ -125,7 +66,6 @@ class DecoderLoader:
         return module
 
     def _to_builtin(self, value: Any, depth: int = 0) -> Any:
-        """Convert parser objects recursively into built-in Python types."""
         if depth > 25:
             return str(value)
 
@@ -167,6 +107,7 @@ class PacketParser:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.decoder_loader = DecoderLoader()
+        self.decoder_manager = DecoderManager(config)
 
     def parse_raw_packet(
         self,
@@ -174,12 +115,6 @@ class PacketParser:
         norad_cat_id: int,
         raw_json: dict[str, Any],
     ) -> ParsedPacket:
-        """
-        Parse one full raw SatNOGS packet into a ParsedPacket.
-
-        The decoder, if any, is chosen from config based on satellite metadata
-        and then APID.
-        """
         timestamp_utc, observer = extract_raw_fields_for_indexing(raw_json)
 
         frame = raw_json.get("frame")
@@ -187,10 +122,6 @@ class PacketParser:
             raise ValueError("Raw packet is missing 'frame'")
 
         frame_hex = str(frame).strip().upper()
-        sat_cfg: SatelliteConfig | None = self.config.resolve_satellite_config(raw_json, norad_cat_id)
-
-        if sat_cfg is not None and sat_cfg.frame_protocol != "ax25_ccsds":
-            raise ValueError(f"Unsupported frame protocol: {sat_cfg.frame_protocol}")
 
         ax25 = extract_ax25_and_ccsds(frame_hex)
         ccsds = parse_ccsds_primary_header(ax25["raw_ccsds_packet_hex"])
@@ -202,15 +133,22 @@ class PacketParser:
         parser_path = ""
         parser_root_class = ""
 
-        if sat_cfg is not None:
-            decoder_spec = sat_cfg.apid_decoders.get(apid)
-            if decoder_spec is not None:
-                parser_path = decoder_spec.parser_path or decoder_spec.ksy_path
-                parser_root_class = decoder_spec.root_class
+        # One decoder per satellite, not per APID
+        decoder_ref = self.decoder_manager.resolve_decoder(norad_cat_id)
+        if decoder_ref is not None:
+            compiled = self.decoder_manager.ensure_compiled(norad_cat_id, decoder_ref)
+            parser_path = str(compiled.generated_py)
+            parser_root_class = compiled.root_class
+
+            try:
                 parsed_json = self.decoder_loader.parse_with_decoder(
-                    spec=decoder_spec,
+                    parser_path=parser_path,
+                    root_class=parser_root_class,
                     packet_hex=ax25["raw_ccsds_packet_hex"],
                 )
+            except Exception:
+                # Keep extracted metadata even if payload decode fails.
+                parsed_json = None
 
         return ParsedPacket(
             raw_frame_id=raw_frame_id,

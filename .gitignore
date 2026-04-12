@@ -9,3 +9,4 @@ __pycache__/
 data/*.sqlite3
 plots/*.png
 config.toml
+.env

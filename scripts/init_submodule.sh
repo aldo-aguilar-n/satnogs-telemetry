@@ -6,10 +6,10 @@ if [ ! -d .git ]; then
   exit 1
 fi
 
-if [ -d external/satnogs-decoders/.git ] || [ -f .gitmodules ]; then
+if [ -d tools/satnogs-decoders/.git ] || [ -f .gitmodules ]; then
   echo "Submodule may already be configured. Running update..."
 else
-  git submodule add https://gitlab.com/librespacefoundation/satnogs/satnogs-decoders.git external/satnogs-decoders
+  git submodule add https://gitlab.com/librespacefoundation/satnogs/satnogs-decoders.git tools/satnogs-decoders
 fi
 
 git submodule update --init --recursive

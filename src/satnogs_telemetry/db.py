@@ -300,3 +300,32 @@ class TelemetryDB:
                 ys.append(float(value))
 
         return xs, ys
+    
+    def delete_raw_packet_by_id(self, raw_frame_id: int) -> None:
+        """
+        Delete one raw packet row by ID.
+        """
+        self.conn.execute(
+            "DELETE FROM raw_frames WHERE id = ?",
+            (raw_frame_id,),
+        )
+        self.conn.commit()
+
+    def delete_raw_packets_by_ids(self, raw_frame_ids: list[int]) -> int:
+        """
+        Delete multiple raw packet rows by ID.
+
+        Returns
+        -------
+        int
+            Number of rows requested for deletion.
+        """
+        if not raw_frame_ids:
+            return 0
+
+        self.conn.executemany(
+            "DELETE FROM raw_frames WHERE id = ?",
+            [(rid,) for rid in raw_frame_ids],
+        )
+        self.conn.commit()
+        return len(raw_frame_ids)
