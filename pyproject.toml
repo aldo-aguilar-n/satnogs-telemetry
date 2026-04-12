@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "satnogs-telemetry"
-version = "0.1.0"
-description = "Headless SatNOGS telemetry downloader, parser, and per-satellite SQLite store"
+version = "0.2.0"
+description = "Headless SatNOGS telemetry downloader, decoder, SQLite store, plotter, and CSV exporter"
 authors = ["OpenAI <support@openai.com>"]
 readme = "README.md"
 packages = [{ include = "satnogs_telemetry", from = "src" }]

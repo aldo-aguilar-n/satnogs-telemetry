@@ -1,16 +1,18 @@
 """
-CSV export helpers for parsed telemetry stored in SQLite.
+CSV export helpers for parsed telemetry.
 
-Behavior:
-- Writes one CSV per APID.
-- Orders rows by metadata timestamp from oldest to newest.
-- Keeps only:
-  - timestamp
-  - observer
-  - CCSDS primary header fields
-  - CCSDS secondary header fields
-  - CCSDS user data fields
-- Uses shortened column names instead of full nested paths.
+This module exports one CSV per APID directly from the parsed SQLite rows.  The
+layout intentionally mirrors the standalone tabulator scripts the project was
+based on:
+
+- timestamp first
+- observer second
+- CCSDS primary header fields
+- CCSDS secondary header fields
+- user data fields
+
+Only decoded payloads that actually contain a usable ``ccsds_space_packet`` are
+included.
 """
 
 from __future__ import annotations
@@ -23,7 +25,10 @@ from typing import Any
 
 def flatten_dict(obj: Any, parent_key: str = "", sep: str = ".") -> dict[str, Any]:
     """
-    Flatten nested dict/list structures into a single-level dict.
+    Flatten nested dict/list structures into a one-level mapping.
+
+    Dict keys become dotted paths, and list indices are appended as numeric path
+    components.
     """
     items: dict[str, Any] = {}
 
@@ -45,8 +50,10 @@ def flatten_dict(obj: Any, parent_key: str = "", sep: str = ".") -> dict[str, An
 
 def _find_first_key_recursive(obj: Any, target_key: str) -> Any | None:
     """
-    Recursively search nested dict/list structures for the first occurrence
-    of a given key and return its value.
+    Recursively search nested dict/list structures for the first matching key.
+
+    This is handy because the decoded payload shape may contain wrappers between
+    the parser root object and the actual CCSDS packet object.
     """
     if isinstance(obj, dict):
         if target_key in obj:
@@ -67,24 +74,22 @@ def _find_first_key_recursive(obj: Any, target_key: str) -> Any | None:
 
 def get_ccsds_space_packet(parsed: dict[str, Any]) -> dict[str, Any] | None:
     """
-    Retrieve the decoded CCSDS space packet from parsed_json.
+    Retrieve the decoded CCSDS space packet from a parsed payload.
+
+    Returns ``None`` if the expected nested path does not exist.
     """
     found = _find_first_key_recursive(parsed, "ccsds_space_packet")
     return found if isinstance(found, dict) else None
 
 
 def flatten_primary_header(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
-    """
-    Flatten the CCSDS primary header using only field names as column names.
-    """
+    """Flatten the primary header using only field names as CSV column names."""
     primary_header = ccsds_packet.get("packet_primary_header", {})
     return flatten_dict(primary_header)
 
 
 def flatten_secondary_header(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
-    """
-    Flatten the CCSDS secondary header using only field names as column names.
-    """
+    """Flatten the secondary header using only field names as CSV column names."""
     try:
         secondary_header = ccsds_packet["data_section"]["secondary_header"]
     except Exception:
@@ -94,10 +99,11 @@ def flatten_secondary_header(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
 
 def flatten_user_data(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
     """
-    Flatten the CCSDS user data field using only field names as column names.
+    Flatten the user data field using only field names as CSV column names.
 
-    If the user data field contains a single wrapper object such as beacon_t,
-    unwrap it so the CSV columns are the actual field names.
+    Many Kaitai decoders wrap the user data in a single type wrapper such as
+    ``beacon_t``.  When that happens, unwrap it so the CSV columns are the real
+    engineering field names rather than the wrapper name.
     """
     try:
         user_data = ccsds_packet["data_section"]["user_data_field"]
@@ -114,7 +120,9 @@ def flatten_user_data(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
 
 def build_row_from_db_row(row: Any) -> dict[str, Any] | None:
     """
-    Build one CSV row from a parsed SQLite row.
+    Build one flattened CSV row from one parsed SQLite row.
+
+    Rows that only contain decode-error/debug metadata are skipped.
     """
     parsed_json = row["parsed_json"]
     if not parsed_json:
@@ -128,7 +136,6 @@ def build_row_from_db_row(row: Any) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         return None
 
-    # Skip decoder failures that only contain debug/error info.
     if parsed.get("_decode_error") is True:
         return None
 
@@ -140,10 +147,10 @@ def build_row_from_db_row(row: Any) -> dict[str, Any] | None:
     out["timestamp"] = row["timestamp_utc"]
     out["observer"] = row["observer"]
 
+    # Keep sections in the exact desired order.
     out.update(flatten_primary_header(ccsds_packet))
     out.update(flatten_secondary_header(ccsds_packet))
     out.update(flatten_user_data(ccsds_packet))
-
     return out
 
 
@@ -183,25 +190,27 @@ def order_columns(rows: list[dict[str, Any]]) -> list[str]:
 
     already_used = set(leading + primary_present + secondary_present)
     user_data_columns = sorted(c for c in all_columns if c not in already_used)
-
     return leading + primary_present + secondary_present + user_data_columns
 
 
-def export_apid_csvs(
-    db,
-    norad_cat_id: int,
-    outdir: str,
-) -> list[str]:
+def export_apid_csvs(db, norad_cat_id: int, outdir: str) -> list[str]:
     """
-    Export one CSV per APID for a NORAD ID from parsed SQLite rows.
+    Export one CSV per APID for a satellite.
+
+    Parameters
+    ----------
+    db
+        Open ``TelemetryDB`` instance.
+    norad_cat_id
+        NORAD ID to export.
+    outdir
+        Output directory root where NORAD subdirectories and APID CSV files
+        will be written.
     """
     rows = db.get_recent_parsed_rows(limit=1_000_000)
-
-    # Keep only the requested NORAD and rows with parsed_json content.
     rows = [row for row in rows if int(row["norad_cat_id"]) == int(norad_cat_id)]
 
     grouped: dict[str, list[dict[str, Any]]] = {}
-
     for row in rows:
         csv_row = build_row_from_db_row(row)
         if csv_row is None:
@@ -211,17 +220,13 @@ def export_apid_csvs(
         apid_key = f"{int(apid):03d}" if apid is not None else "unknown"
         grouped.setdefault(apid_key, []).append(csv_row)
 
-    output_dir = Path(outdir)
+    output_dir = Path(outdir) / str(norad_cat_id)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     written_files: list[str] = []
-
     for apid_key, apid_rows in sorted(grouped.items(), key=lambda kv: kv[0]):
-        apid_rows = sorted(
-            apid_rows,
-            key=lambda r: (r.get("timestamp") is None, r.get("timestamp", "")),
-        )
-
+        # Metadata timestamps are used to order packets chronologically.
+        apid_rows = sorted(apid_rows, key=lambda r: (r.get("timestamp") is None, r.get("timestamp", "")))
         columns = order_columns(apid_rows)
         outpath = output_dir / f"apid_{apid_key}.csv"
 

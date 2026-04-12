@@ -1,45 +1,44 @@
 """
 Command-line interface for the SatNOGS telemetry backend.
 
-Default behavior:
-    poetry run satnogs-telemetry --norad 98338
+The CLI is intentionally thin.  It only:
+- defines commands and arguments
+- opens the needed service objects
+- prints human-readable progress and summaries
+- routes the command to the correct module
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 import json
-import os
 import sys
-from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .config import AppConfig, load_app_config
 from .csv_export import export_apid_csvs
-from .db import TelemetryDB
-from .decoder_manager import DecoderManager
-from .ingest import IngestService
+from .database import TelemetryDB
+from .decode import DecoderManager, DecoderService
+from .download import DownloadService
 from .plotting import plot_field_to_png
 
+def _result_errors(obj):
+    """
+    Return the 'errors' field from either a dataclass result object or a dict.
+    """
+    if isinstance(obj, dict):
+        return obj.get("errors", [])
+    return getattr(obj, "errors", [])
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level CLI parser and all subcommands."""
     parser = argparse.ArgumentParser(
         prog="satnogs-telemetry",
         description="Headless SatNOGS telemetry backend",
     )
-
     parser.add_argument("--norad", type=int, help="NORAD catalog ID")
-    parser.add_argument("--db-dir", default=None, help="Override database directory")
-    parser.add_argument("--base-url", default=None, help="Override SatNOGS telemetry base URL")
-    parser.add_argument("--config", default="config.toml", help="Path to config TOML")
-    parser.add_argument(
-        "--no-prompt",
-        action="store_true",
-        help="Do not ask interactively for decoder selection",
-    )
-
+    parser.add_argument("--no-prompt", action="store_true", help="Do not ask interactively for decoder selection")
     subparsers = parser.add_subparsers(dest="command")
 
     p_init = subparsers.add_parser("init-db", help="Initialize the satellite SQLite database schema")
@@ -58,14 +57,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_reparse_all = subparsers.add_parser(
         "reparse-all",
-        help="Delete existing parsed rows for this NORAD and rebuild them from raw rows",
+        help="Delete existing parsed rows and rebuild them from raw rows",
     )
     _add_satellite_args(p_reparse_all)
 
-    p_export_csv = subparsers.add_parser(
-        "export-csv",
-        help="Export one CSV per APID with timestamp, observer, primary header, secondary header, and user data",
-    )
+    p_export_csv = subparsers.add_parser("export-csv", help="Export one CSV per APID")
     _add_satellite_args(p_export_csv)
     p_export_csv.add_argument("--outdir", default="csv", help="Output directory for APID CSV files")
 
@@ -91,93 +87,90 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_satellite_args(parser: argparse.ArgumentParser) -> None:
+    """Add the common NORAD-related arguments shared by most subcommands."""
     parser.add_argument("--norad", required=True, type=int, help="NORAD catalog ID")
-    parser.add_argument("--db-dir", default=None, help="Override database directory")
-    parser.add_argument("--base-url", default=None, help="Override SatNOGS telemetry base URL")
-    parser.add_argument("--config", default="config.toml", help="Path to config TOML")
-    parser.add_argument(
-        "--no-prompt",
-        action="store_true",
-        help="Do not ask interactively for decoder selection",
-    )
-
-
-def _make_config(args: argparse.Namespace) -> AppConfig:
-    load_dotenv()
-
-    cfg = load_app_config(args.config)
-    cfg.config_path = Path(args.config)
-
-    if args.db_dir:
-        cfg.db_dir = Path(args.db_dir)
-    if args.base_url:
-        cfg.satnogs_base_url = args.base_url
-
-    env_token = os.getenv("SATNOGS_API_TOKEN", "").strip()
-    if env_token:
-        cfg.satnogs_api_token = env_token
-
-    return cfg
-
-
-def _open_db_and_service(args: argparse.Namespace) -> tuple[TelemetryDB, IngestService, AppConfig]:
-    config = _make_config(args)
-    db_path = config.db_path_for_norad(args.norad)
-    db = TelemetryDB(db_path)
-    service = IngestService(config=config, db=db, norad_cat_id=args.norad)
-    return db, service, config
+    parser.add_argument("--no-prompt", action="store_true", help="Do not ask interactively for decoder selection")
 
 
 def _print(msg: str) -> None:
+    """Flush-print helper used for progress updates."""
     print(msg, flush=True)
 
 
-def _ensure_decoder_selected(config: AppConfig, norad_cat_id: int, no_prompt: bool) -> None:
-    manager = DecoderManager(config)
+def _open_services(args: argparse.Namespace) -> tuple[TelemetryDB, DownloadService, DecoderService]:
+    """
+    Open the DB plus the download/decode services needed by most commands.
 
-    if norad_cat_id in config.satellite_decoders:
+    ``load_dotenv()`` happens here so every command sees the SatNOGS token from
+    the local ``.env`` file.
+    """
+    load_dotenv()
+    db = TelemetryDB(args.norad)
+    db.init_schema()
+    download_service = DownloadService(db)
+    decoder_service = DecoderService(db)
+    return db, download_service, decoder_service
+
+
+def _ensure_decoder_selected(norad_cat_id: int, no_prompt: bool) -> None:
+    """
+    Ensure a decoder mapping exists for this NORAD ID.
+
+    If a mapping is already present in config.toml, do nothing.
+    If not, either prompt the user to choose one or skip prompting when
+    --no-prompt was requested.
+    """
+    from .decode import load_decoder_mapping
+
+    mapping = load_decoder_mapping()
+
+    if norad_cat_id in mapping:
         return
 
     if no_prompt:
         _print(f"No decoder configured for NORAD {norad_cat_id}; continuing without prompt.")
         return
 
+    manager = DecoderManager()
     manager.resolve_decoder(norad_cat_id)
     _print(f"Decoder configured for NORAD {norad_cat_id}.")
 
 
 def cmd_default_run(args: argparse.Namespace) -> int:
+    """
+    Default command used when no subcommand is provided.
+
+    This performs the normal day-to-day workflow:
+    1. sync new raw packets
+    2. parse unparsed raw rows
+    """
     if args.norad is None:
         print("error: --norad is required")
         return 2
 
-    db, service, config = _open_db_and_service(args)
-
+    db, downloader, decoder = _open_services(args)
     try:
-        db.init_schema()
         _print(f"Using database: {db.path}")
+        _ensure_decoder_selected(args.norad, args.no_prompt)
 
-        _ensure_decoder_selected(config, args.norad, args.no_prompt)
-
-        raw_result = service.sync_raw_latest(log=_print)
+        raw_result = downloader.sync_raw_latest(norad_cat_id=args.norad, log=_print)
         _print("Raw sync result:")
         _print(json.dumps(asdict(raw_result), indent=2))
 
-        parse_result = service.parse_unparsed(log=_print)
+        parse_result = decoder.parse_unparsed(norad_cat_id=args.norad, log=_print)
         _print("Parse result:")
-        _print(json.dumps(asdict(parse_result), indent=2))
+        _print(json.dumps(parse_result, indent=2))
 
-        had_errors = bool(raw_result.errors or parse_result.errors)
+        had_errors = bool(_result_errors(raw_result) or _result_errors(parse_result))
         return 1 if had_errors else 0
-
     finally:
         db.close()
 
 
 def cmd_init_db(args: argparse.Namespace) -> int:
-    db, _service, _config = _open_db_and_service(args)
+    """Create/open the NORAD database and initialize the schema."""
+    db, _downloader, _decoder = _open_services(args)
     try:
-        db.init_schema()
         _print(f"Initialized database: {db.path}")
         return 0
     finally:
@@ -185,68 +178,65 @@ def cmd_init_db(args: argparse.Namespace) -> int:
 
 
 def cmd_sync_raw_latest(args: argparse.Namespace) -> int:
-    db, service, _config = _open_db_and_service(args)
+    """Sync only packets newer than the latest stored raw row."""
+    db, downloader, _decoder = _open_services(args)
     try:
-        db.init_schema()
-        result = service.sync_raw_latest(log=_print)
+        result = downloader.sync_raw_latest(norad_cat_id=args.norad, log=_print)
         _print(json.dumps(asdict(result), indent=2))
-        return 0 if not result.errors else 1
+        return 0 if not _result_errors(result) else 1
     finally:
         db.close()
 
 
 def cmd_sync_raw_range(args: argparse.Namespace) -> int:
-    db, service, _config = _open_db_and_service(args)
+    """Sync packets within an explicit time range."""
+    db, downloader, _decoder = _open_services(args)
     try:
-        db.init_schema()
-        result = service.sync_raw_range(
+        result = downloader.sync_raw_range(
+            norad_cat_id=args.norad,
             start_utc=args.start,
             end_utc=args.end,
             log=_print,
         )
         _print(json.dumps(asdict(result), indent=2))
-        return 0 if not result.errors else 1
+        return 0 if not _result_errors(result) else 1
     finally:
         db.close()
 
 
 def cmd_parse_unparsed(args: argparse.Namespace) -> int:
-    db, service, config = _open_db_and_service(args)
+    """Parse only raw rows that do not already have parsed rows."""
+    db, _downloader, decoder = _open_services(args)
     try:
-        db.init_schema()
-        _ensure_decoder_selected(config, args.norad, args.no_prompt)
-        result = service.parse_unparsed(log=_print)
-        _print(json.dumps(asdict(result), indent=2))
-        return 0 if not result.errors else 1
+        _ensure_decoder_selected(args.norad, args.no_prompt)
+        result = decoder.parse_unparsed(norad_cat_id=args.norad, log=_print)
+        _print(json.dumps(result, indent=2))
+        return 0 if not _result_errors(result) else 1
     finally:
         db.close()
 
 
 def cmd_reparse_all(args: argparse.Namespace) -> int:
-    db, service, config = _open_db_and_service(args)
+    """
+    Delete existing parsed rows for this NORAD and rebuild them from raw rows.
+    """
+    db, _downloader, decoder = _open_services(args)
     try:
-        db.init_schema()
-        _ensure_decoder_selected(config, args.norad, args.no_prompt)
-
+        _ensure_decoder_selected(args.norad, args.no_prompt)
         deleted = db.delete_parsed_rows_for_norad(args.norad)
         _print(f"Deleted {deleted} existing parsed rows for NORAD {args.norad}")
-
-        result = service.parse_unparsed(log=_print)
-        _print(json.dumps(asdict(result), indent=2))
-        return 0 if not result.errors else 1
+        result = decoder.parse_unparsed(norad_cat_id=args.norad, log=_print)
+        _print(json.dumps(result, indent=2))
+        return 0 if not _result_errors(result) else 1
     finally:
         db.close()
 
 
 def cmd_export_csv(args: argparse.Namespace) -> int:
-    db, _service, _config = _open_db_and_service(args)
+    """Export one CSV per APID for the requested NORAD ID."""
+    db, _downloader, _decoder = _open_services(args)
     try:
-        db.init_schema()
-        written = export_apid_csvs(
-            db=db,
-            norad_cat_id=args.norad,
-            outdir=args.outdir,
-        )
+        written = export_apid_csvs(db=db, norad_cat_id=args.norad, outdir=args.outdir)
         _print(f"Wrote {len(written)} CSV files to {args.outdir}")
         for path in written:
             _print(path)
@@ -256,7 +246,8 @@ def cmd_export_csv(args: argparse.Namespace) -> int:
 
 
 def cmd_show_recent_raw(args: argparse.Namespace) -> int:
-    db, _service, _config = _open_db_and_service(args)
+    """Print a few recent raw rows for inspection/debugging."""
+    db, _downloader, _decoder = _open_services(args)
     try:
         rows = db.get_recent_raw_rows(limit=args.limit)
         for row in rows:
@@ -272,7 +263,8 @@ def cmd_show_recent_raw(args: argparse.Namespace) -> int:
 
 
 def cmd_show_recent_parsed(args: argparse.Namespace) -> int:
-    db, _service, _config = _open_db_and_service(args)
+    """Print a few recent parsed rows for inspection/debugging."""
+    db, _downloader, _decoder = _open_services(args)
     try:
         rows = db.get_recent_parsed_rows(limit=args.limit)
         for row in rows:
@@ -294,7 +286,8 @@ def cmd_show_recent_parsed(args: argparse.Namespace) -> int:
 
 
 def cmd_list_fields(args: argparse.Namespace) -> int:
-    db, _service, _config = _open_db_and_service(args)
+    """Print the numeric decoded field names available for plotting."""
+    db, _downloader, _decoder = _open_services(args)
     try:
         fields = db.get_available_numeric_fields(apid=args.apid)
         for field in fields:
@@ -305,14 +298,10 @@ def cmd_list_fields(args: argparse.Namespace) -> int:
 
 
 def cmd_plot(args: argparse.Namespace) -> int:
-    db, _service, _config = _open_db_and_service(args)
+    """Plot one decoded field and write it to a PNG file."""
+    db, _downloader, _decoder = _open_services(args)
     try:
-        output = plot_field_to_png(
-            db=db,
-            field_name=args.field,
-            output_path=args.output,
-            apid=args.apid,
-        )
+        output = plot_field_to_png(db=db, field_name=args.field, output_path=args.output, apid=args.apid)
         _print(f"Saved plot: {output}")
         return 0
     finally:
@@ -320,12 +309,12 @@ def cmd_plot(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """CLI entry point used by the Poetry script definition."""
     parser = _build_parser()
     args = parser.parse_args()
 
     if args.command is None:
         return cmd_default_run(args)
-
     if args.command == "init-db":
         return cmd_init_db(args)
     if args.command == "sync-raw-latest":
