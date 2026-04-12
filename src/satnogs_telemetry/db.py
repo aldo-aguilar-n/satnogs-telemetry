@@ -329,3 +329,45 @@ class TelemetryDB:
         )
         self.conn.commit()
         return len(raw_frame_ids)
+    
+    def get_parsed_table_name(self) -> str:
+        """
+        Return the parsed table name used by this database schema.
+        """
+        candidates = ("parsed_packets", "parsed_frames")
+
+        for name in candidates:
+            row = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (name,),
+            ).fetchone()
+            if row is not None:
+                return name
+
+        raise RuntimeError(
+            "Could not find parsed table. Expected one of: parsed_packets, parsed_frames"
+        )
+
+    def delete_parsed_rows_for_norad(self, norad_cat_id: int) -> int:
+        """
+        Delete all parsed rows for one NORAD ID.
+
+        Returns
+        -------
+        int
+            Number of rows deleted.
+        """
+        table = self.get_parsed_table_name()
+
+        row = self.conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE norad_cat_id = ?",
+            (norad_cat_id,),
+        ).fetchone()
+        count = int(row[0]) if row else 0
+
+        self.conn.execute(
+            f"DELETE FROM {table} WHERE norad_cat_id = ?",
+            (norad_cat_id,),
+        )
+        self.conn.commit()
+        return count

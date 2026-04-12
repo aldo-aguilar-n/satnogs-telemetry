@@ -17,6 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .config import AppConfig, load_app_config
+from .csv_export import export_apid_csvs
 from .db import TelemetryDB
 from .decoder_manager import DecoderManager
 from .ingest import IngestService
@@ -54,6 +55,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_parse = subparsers.add_parser("parse-unparsed", help="Parse raw rows that do not yet have parsed rows")
     _add_satellite_args(p_parse)
+
+    p_reparse_all = subparsers.add_parser(
+        "reparse-all",
+        help="Delete existing parsed rows for this NORAD and rebuild them from raw rows",
+    )
+    _add_satellite_args(p_reparse_all)
+
+    p_export_csv = subparsers.add_parser(
+        "export-csv",
+        help="Export one CSV per APID with timestamp, observer, primary header, secondary header, and user data",
+    )
+    _add_satellite_args(p_export_csv)
+    p_export_csv.add_argument("--outdir", default="csv", help="Output directory for APID CSV files")
 
     p_show_raw = subparsers.add_parser("show-recent-raw", help="Show recent raw rows")
     _add_satellite_args(p_show_raw)
@@ -208,6 +222,39 @@ def cmd_parse_unparsed(args: argparse.Namespace) -> int:
         db.close()
 
 
+def cmd_reparse_all(args: argparse.Namespace) -> int:
+    db, service, config = _open_db_and_service(args)
+    try:
+        db.init_schema()
+        _ensure_decoder_selected(config, args.norad, args.no_prompt)
+
+        deleted = db.delete_parsed_rows_for_norad(args.norad)
+        _print(f"Deleted {deleted} existing parsed rows for NORAD {args.norad}")
+
+        result = service.parse_unparsed(log=_print)
+        _print(json.dumps(asdict(result), indent=2))
+        return 0 if not result.errors else 1
+    finally:
+        db.close()
+
+
+def cmd_export_csv(args: argparse.Namespace) -> int:
+    db, _service, _config = _open_db_and_service(args)
+    try:
+        db.init_schema()
+        written = export_apid_csvs(
+            db=db,
+            norad_cat_id=args.norad,
+            outdir=args.outdir,
+        )
+        _print(f"Wrote {len(written)} CSV files to {args.outdir}")
+        for path in written:
+            _print(path)
+        return 0
+    finally:
+        db.close()
+
+
 def cmd_show_recent_raw(args: argparse.Namespace) -> int:
     db, _service, _config = _open_db_and_service(args)
     try:
@@ -287,6 +334,10 @@ def main() -> int:
         return cmd_sync_raw_range(args)
     if args.command == "parse-unparsed":
         return cmd_parse_unparsed(args)
+    if args.command == "reparse-all":
+        return cmd_reparse_all(args)
+    if args.command == "export-csv":
+        return cmd_export_csv(args)
     if args.command == "show-recent-raw":
         return cmd_show_recent_raw(args)
     if args.command == "show-recent-parsed":

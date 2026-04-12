@@ -133,22 +133,62 @@ class PacketParser:
         parser_path = ""
         parser_root_class = ""
 
-        # One decoder per satellite, not per APID
         decoder_ref = self.decoder_manager.resolve_decoder(norad_cat_id)
         if decoder_ref is not None:
             compiled = self.decoder_manager.ensure_compiled(norad_cat_id, decoder_ref)
             parser_path = str(compiled.generated_py)
             parser_root_class = compiled.root_class
 
-            try:
-                parsed_json = self.decoder_loader.parse_with_decoder(
-                    parser_path=parser_path,
-                    root_class=parser_root_class,
-                    packet_hex=ax25["raw_ccsds_packet_hex"],
-                )
-            except Exception:
-                # Keep extracted metadata even if payload decode fails.
-                parsed_json = None
+            full_ccsds_hex = ax25["raw_ccsds_packet_hex"]
+            ccsds_payload_hex = full_ccsds_hex[12:] if len(full_ccsds_hex) >= 12 else ""
+
+            # AX.25 information field = everything after destination/src/control/PID.
+            # extract_ax25_and_ccsds already verified AX.25 enough to get the CCSDS packet,
+            # so a simple fallback candidate here is CCSDS packet with the leading PID removed.
+            # Since raw_ccsds_packet_hex already starts after PID, we also keep a copy of the
+            # full AX.25 frame for debugging context.
+            candidates: list[tuple[str, str]] = []
+
+            if ccsds_payload_hex:
+                candidates.append(("ccsds_payload", ccsds_payload_hex))
+            if full_ccsds_hex:
+                candidates.append(("full_ccsds", full_ccsds_hex))
+
+            # Last resort: try the whole AX.25 frame in case the schema is more complete
+            # than expected.
+            candidates.append(("full_ax25_frame", ax25["raw_ax25_frame_hex"]))
+
+            decode_errors: list[str] = []
+
+            for mode, candidate_hex in candidates:
+                try:
+                    parsed_json = self.decoder_loader.parse_with_decoder(
+                        parser_path=parser_path,
+                        root_class=parser_root_class,
+                        packet_hex=candidate_hex,
+                    )
+
+                    # Tag which candidate succeeded for debugging.
+                    if isinstance(parsed_json, dict):
+                        parsed_json["_decode_mode"] = mode
+                    else:
+                        parsed_json = {
+                            "_decode_mode": mode,
+                            "value": parsed_json,
+                        }
+                    break
+
+                except Exception as exc:
+                    decode_errors.append(f"{mode}: {type(exc).__name__}: {exc}")
+
+            if parsed_json is None:
+                parsed_json = {
+                    "_decode_error": True,
+                    "_parser_path": parser_path,
+                    "_root_class": parser_root_class,
+                    "_tried_modes": [mode for mode, _ in candidates],
+                    "_errors": decode_errors,
+                }
 
         return ParsedPacket(
             raw_frame_id=raw_frame_id,

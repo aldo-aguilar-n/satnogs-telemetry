@@ -19,10 +19,9 @@ class AppConfig:
     satnogs_base_url: str = "https://db.satnogs.org/api/telemetry/"
     request_timeout_s: int = 60
     source_name: str = "satnogs_db"
-
     satnogs_decoders_dir: Path = Path("tools/satnogs-decoders")
     generated_decoders_dir: Path = Path("decoders")
-    ksc_bin: str = "kaitai-struct-compiler"
+    ksc_bin: str = "C:/Program Files (x86)/kaitai-struct-compiler/bin/kaitai-struct-compiler.bat"
     config_path: Path = Path("config.toml")
 
     # Loaded from .env by cli.py, with config.toml fallback
@@ -76,7 +75,7 @@ def load_app_config(config_path: str | Path) -> AppConfig:
         source_name=str(app.get("source_name", "satnogs_db")),
         satnogs_decoders_dir=Path(app.get("satnogs_decoders_dir", "tools/satnogs-decoders")),
         generated_decoders_dir=Path(app.get("generated_decoders_dir", "decoders")),
-        ksc_bin=str(app.get("ksc_bin", "kaitai-struct-compiler")),
+        ksc_bin=str(app.get("ksc_bin", "C:/Program Files (x86)/kaitai-struct-compiler/bin/kaitai-struct-compiler.bat")),
         config_path=path,
         satnogs_api_token=str(app.get("satnogs_api_token", "")).strip(),
         satellite_decoders=satellite_decoders,
