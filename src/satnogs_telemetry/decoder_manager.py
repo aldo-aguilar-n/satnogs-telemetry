@@ -30,7 +30,7 @@ class DecoderRef:
 
     ksy_path: Path
     root_class: str
-    cache_key: str
+    cache_key: str = ""
 
 
 @dataclass(slots=True)
@@ -50,9 +50,6 @@ class DecoderManager:
     """
 
     def __init__(self, config: AppConfig) -> None:
-        """
-        Initialize the decoder manager.
-        """
         self.config = config
         self.config.generated_decoders_dir.mkdir(parents=True, exist_ok=True)
 
@@ -62,16 +59,6 @@ class DecoderManager:
 
         If no decoder is configured yet, interactively prompt the user to choose
         one from the satnogs-decoders submodule, then save that mapping to config.
-
-        Parameters
-        ----------
-        norad_cat_id
-            NORAD catalog ID.
-
-        Returns
-        -------
-        DecoderRef | None
-            Decoder reference.
         """
         decoder_info = self.config.satellite_decoders.get(norad_cat_id)
 
@@ -103,19 +90,20 @@ class DecoderManager:
             raise ValueError(f"Decoder entry for NORAD {norad_cat_id} is missing 'root_class'")
 
         ksy_path = (self.config.satnogs_decoders_dir / rel_ksy).resolve()
-        cache_key = "satellite_decoder"
 
         return DecoderRef(
             ksy_path=ksy_path,
             root_class=root_class,
-            cache_key=cache_key,
+            cache_key="",
         )
 
     def ensure_compiled(self, norad_cat_id: int, decoder: DecoderRef) -> CompiledDecoder:
         """
         Compile a decoder if needed, otherwise reuse the cached generated Python file.
         """
-        out_dir = self.config.generated_decoders_dir / str(norad_cat_id) / decoder.cache_key
+        out_dir = self.config.generated_decoders_dir / str(norad_cat_id)
+        if decoder.cache_key:
+            out_dir = out_dir / decoder.cache_key
         out_dir.mkdir(parents=True, exist_ok=True)
 
         generated_py = out_dir / f"{decoder.ksy_path.stem}.py"
@@ -144,17 +132,24 @@ class DecoderManager:
         if not ksy_path.exists():
             raise FileNotFoundError(f"KSY file not found: {ksy_path}")
 
-        subprocess.run(
-            [
-                self.config.ksc_bin,
-                "-t",
-                "python",
-                "-d",
-                str(out_dir),
-                str(ksy_path),
-            ],
-            check=True,
-        )
+        try:
+            subprocess.run(
+                [
+                    self.config.ksc_bin,
+                    "-t",
+                    "python",
+                    "-d",
+                    str(out_dir),
+                    str(ksy_path),
+                ],
+                check=True,
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "Could not find Kaitai Struct compiler. "
+                f"Configured ksc_bin={self.config.ksc_bin!r}. "
+                "Install it or set [app].ksc_bin in config.toml to the full executable path."
+            ) from exc
 
     def _is_cache_valid(
         self,
