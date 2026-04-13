@@ -1,21 +1,26 @@
 """
-Time-series plotting helpers.
+Title: plotting.py
+Authors: Aldo Aguilar
+Date: 2026-04-12
+Description: Time-series plotting helpers.
 
-The plotting module intentionally stays simple: it extracts one numeric field
-from parsed JSON payloads and plots it against the stored metadata timestamp.
-This keeps plotting fast and predictable for command-line usage.
+This simple plotting module extracts one numeric field from parsed JSON
+payloads and plots it against the stored metadata timestamp. This keeps 
+plotting fast and predictable for command-line usage.
 """
 
+# System imports
 from __future__ import annotations
-
-import json
 from datetime import datetime
+import json
 from pathlib import Path
 from typing import Any
 
+# Third-party imports
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
+# ------------------------- Plotting Functions -------------------------
 
 def _flatten_dict(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     """
@@ -23,7 +28,7 @@ def _flatten_dict(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
 
     Example
     -------
-    ``{"a": {"b": 1}}`` becomes ``{"a.b": 1}``.
+    '{"a": {"b": 1}}' becomes '{"a.b": 1}'.
     """
     flat: dict[str, Any] = {}
     for key, value in data.items():
@@ -34,23 +39,26 @@ def _flatten_dict(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
             flat[full_key] = value
     return flat
 
-
 def _short_field_name(field_name: str) -> str:
-    """Return only the last component of a dotted field path."""
+    """
+    Return only the last component of a dotted field path.
+    """
     return field_name.split(".")[-1]
 
-
 def _parse_utc_timestamp(ts: str) -> datetime:
-    """Convert an ISO timestamp like ``2026-04-12T03:02:41Z`` to ``datetime``."""
+    """
+    Convert an ISO timestamp like '2026-04-12T03:02:41Z' to 'datetime'.
+    """
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
-
-def _numeric_series_from_rows(rows: list[Any], field_name: str) -> tuple[list[datetime], list[float]]:
+def _numeric_series_from_rows(rows: list[Any], 
+                              field_name: str) -> tuple[list[datetime], list[float]]:
     """
-    Pull one numeric field out of parsed rows and build a time/value series.
+    Pull one numeric field out of parsed rows and build a time/value 
+    series.
 
-    Rows with empty payloads or explicit decode-error marker payloads are
-    skipped.
+    Rows with empty payloads or explicit decode-error marker payloads
+    are skipped.
     """
     times: list[datetime] = []
     values: list[float] = []
@@ -79,15 +87,16 @@ def _numeric_series_from_rows(rows: list[Any], field_name: str) -> tuple[list[da
 
     return times, values
 
-
-def plot_field_to_png(db, field_name: str, output_path: str, apid: int | None = None) -> str:
+def plot_field_to_png(db, field_name: str, output_path: str, 
+                      apid: int | None = None) -> str:
     """
-    Plot one decoded numeric field versus metadata timestamp and save a PNG.
+    Plot one decoded numeric field versus metadata timestamp and save a 
+    PNG.
 
     Parameters
     ----------
     db
-        Open ``TelemetryDB`` instance.
+        Open 'TelemetryDB' instance.
     field_name
         Dotted path of the numeric field to plot.
     output_path
@@ -103,8 +112,8 @@ def plot_field_to_png(db, field_name: str, output_path: str, apid: int | None = 
     if not times or not values:
         raise ValueError(f"No numeric data found for field: {field_name}")
 
-    # Sort by time so the line plot is drawn in chronological order even if the
-    # database query returned rows newest-first.
+    # Sort by time so the line plot is drawn in chronological order even 
+    # if the database query returned rows newest-first.
     paired = sorted(zip(times, values), key=lambda x: x[0])
     times = [p[0] for p in paired]
     values = [p[1] for p in paired]
@@ -132,4 +141,7 @@ def plot_field_to_png(db, field_name: str, output_path: str, apid: int | None = 
     fig.tight_layout()
     fig.savefig(output, dpi=150)
     plt.close(fig)
+
     return str(output)
+
+# ----------------------------------------------------------------------

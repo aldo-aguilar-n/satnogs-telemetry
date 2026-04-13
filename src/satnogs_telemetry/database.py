@@ -1,30 +1,34 @@
 """
-SQLite database layer for SatNOGS telemetry.
+Title: database.py
+Authors: Aldo Aguilar
+Date: 2026-04-12
+Description: SQLite database layer for SatNOGS telemetry.
 
-This module owns all direct interaction with SQLite.  The rest of the project
-should treat this class as the single place where database schema and queries
-live.
+This module owns all direct interaction with SQLite. The rest of the 
+project treats this class as the single place where database schema and 
+queries live.
 
 Design notes
 ------------
 - One database file is created per NORAD ID.
-- Raw SatNOGS packets are stored unchanged in ``raw_frames``.
-- Parsed/decoded rows are stored separately in ``parsed_frames``.
-- The parsed table points back to the raw table through ``raw_frame_id`` so
-  reparsing can be done later without redownloading packets.
+- Raw SatNOGS packets are stored unchanged in 'raw_frames'.
+- Parsed/decoded rows are stored separately in 'parsed_frames'.
+- The parsed table points back to the raw table through 'raw_frame_id'
+  so reparsing can be done later without redownloading packets.
 """
 
+# System imports
 from __future__ import annotations
-
-import json
-import sqlite3
 from dataclasses import dataclass
+import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 # All per-satellite SQLite files are stored under this folder.
 DATA_DIR = Path("data")
 
+# -----------------------__--- Data Classes ------__--------------------
 
 @dataclass(slots=True)
 class RawPacket:
@@ -40,14 +44,13 @@ class RawPacket:
     observer
         SatNOGS observer / station name.
     raw_json
-        Full raw SatNOGS JSON packet.  This is stored as-is in the database.
+        Full raw SatNOGS JSON packet. This is stored as-is in the 
+        database.
     """
-
     norad_cat_id: int
     timestamp_utc: str
     observer: str
     raw_json: dict[str, Any]
-
 
 @dataclass(slots=True)
 class ParsedPacket:
@@ -55,10 +58,9 @@ class ParsedPacket:
     In-memory representation of one parsed packet row.
 
     This structure holds both transport/header metadata and the optional
-    decoded payload.  The payload may be ``None`` when header extraction
+    decoded payload. The payload may be 'None' when header extraction
     succeeded but mission-specific decoding failed.
     """
-
     raw_frame_id: int
     norad_cat_id: int
     timestamp_utc: str
@@ -73,15 +75,14 @@ class ParsedPacket:
     parser_path: str = ""
     parser_root_class: str = ""
 
-
 @dataclass(slots=True)
 class SyncResult:
     """
     Small status object used by download/parse commands.
 
-    The CLI serializes this object to JSON for human-readable progress reports.
+    The CLI serializes this object to JSON for human-readable progress
+    reports.
     """
-
     total_seen: int = 0
     raw_inserted: int = 0
     raw_existing: int = 0
@@ -91,43 +92,50 @@ class SyncResult:
     errors: list[str] | None = None
 
     def __post_init__(self) -> None:
-        """Ensure ``errors`` is always a mutable list."""
+        """
+        Ensure 'errors' is always a mutable list.
+        """
         if self.errors is None:
             self.errors = []
 
+# ------------------------- Telemetry Database -------------------------
 
 class TelemetryDB:
     """
     Thin wrapper around the per-satellite SQLite database.
 
-    Each instance points to exactly one NORAD-specific database file such as
-    ``data/98386.sqlite3``.
+    Each instance points to exactly one NORAD-specific database file
+    such as 'data/98386.sqlite3'.
     """
 
     def __init__(self, norad_cat_id: int) -> None:
         """
         Open or create the database for one satellite.
 
-        The parent ``data/`` directory is created automatically when needed.
+        The parent 'data/' directory is created automatically when 
+        needed.
         """
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.path = DATA_DIR / f"{norad_cat_id}.sqlite3"
         self.conn = sqlite3.connect(self.path)
-        # Returning rows as mapping-like objects makes the rest of the code
-        # easier to read than tuple indexing.
+        # Returning rows as mapping-like objects makes the rest of the 
+        # code easier to read than tuple indexing.
         self.conn.row_factory = sqlite3.Row
 
     def close(self) -> None:
-        """Close the SQLite connection."""
+        """
+        Close the SQLite connection.
+        """
         self.conn.close()
 
     def init_schema(self) -> None:
         """
         Create database tables and indexes if they do not already exist.
 
-        ``raw_frames`` stores the raw SatNOGS packet JSON exactly as received.
-        ``parsed_frames`` stores extracted AX.25/CCSDS metadata plus decoded
-        payload information.
+        'raw_frames' stores the raw SatNOGS packet JSON exactly as 
+        received.
+        'parsed_frames' stores extracted AX.25/CCSDS metadata plus
+        decoded payload information.
         """
         self.conn.executescript(
             """
@@ -168,21 +176,23 @@ class TelemetryDB:
         )
         self.conn.commit()
 
-    def insert_raw_packet(self, raw: RawPacket, inserted_utc: str, source: str) -> tuple[int | None, bool]:
+    def insert_raw_packet(self, raw: RawPacket, inserted_utc: str, 
+                          source: str) -> tuple[int | None, bool]:
         """
         Insert one raw packet if it is not already present.
 
         Returns
         -------
         tuple[int | None, bool]
-            ``(row_id, inserted)`` where ``inserted`` is ``True`` only when a
+            '(row_id, inserted)' where 'inserted' is 'True' only when a
             new row was created.
         """
         payload = json.dumps(raw.raw_json, ensure_ascii=False, separators=(",", ":"))
 
-        # The unique constraint is defined across NORAD, timestamp, observer,
-        # and the full raw JSON text.  We check first so the caller can learn
-        # the existing row ID without raising an exception.
+        # The unique constraint is defined across NORAD, timestamp, 
+        # observer, and the full raw JSON text. We check first so the 
+        # caller can learn the existing row ID without raising an 
+        # exception.
         existing = self.conn.execute(
             """
             SELECT id FROM raw_frames
@@ -193,6 +203,8 @@ class TelemetryDB:
         if existing:
             return int(existing[0]), False
 
+        # If the row does not already exist, insert it and return the
+        # new ID.
         cur = self.conn.execute(
             """
             INSERT INTO raw_frames (
@@ -208,9 +220,12 @@ class TelemetryDB:
         """
         Insert one parsed packet row if it does not already exist.
 
-        Parsed rows are uniquely keyed by ``raw_frame_id`` because each raw row
-        should produce at most one parsed row at a time.
+        Parsed rows are uniquely keyed by 'raw_frame_id' because each 
+        raw row should produce at most one parsed row at a time.
         """
+        # Check if a parsed row already exists for this raw frame. We
+        # check first so the caller can know whether the row was new or 
+        # existing
         existing = self.conn.execute(
             "SELECT id FROM parsed_frames WHERE raw_frame_id = ?",
             (parsed.raw_frame_id,),
@@ -218,6 +233,9 @@ class TelemetryDB:
         if existing:
             return False
 
+        # Store the parsed JSON as text. This is optional and may be
+        # 'None' when parsing succeeded but mission-specific decoding 
+        # failed.
         parsed_json = json.dumps(parsed.parsed_json, ensure_ascii=False) if parsed.parsed_json is not None else None
         self.conn.execute(
             """
@@ -249,7 +267,9 @@ class TelemetryDB:
         return True
 
     def get_last_raw_timestamp(self) -> str | None:
-        """Return the newest raw metadata timestamp currently stored."""
+        """
+        Return the newest raw metadata timestamp currently stored.
+        """
         row = self.conn.execute(
             "SELECT timestamp_utc FROM raw_frames ORDER BY timestamp_utc DESC LIMIT 1"
         ).fetchone()
@@ -259,7 +279,8 @@ class TelemetryDB:
         """
         Return all raw rows that do not yet have a matching parsed row.
 
-        Rows are ordered oldest-to-newest so parsing proceeds chronologically.
+        Rows are ordered oldest-to-newest so parsing proceeds 
+        chronologically.
         """
         cur = self.conn.execute(
             """
@@ -273,7 +294,9 @@ class TelemetryDB:
         return list(cur.fetchall())
 
     def get_recent_raw_rows(self, limit: int = 20) -> list[sqlite3.Row]:
-        """Return the most recent raw rows for inspection/debugging."""
+        """
+        Return the most recent raw rows for inspection/debugging.
+        """
         return list(
             self.conn.execute(
                 "SELECT * FROM raw_frames ORDER BY timestamp_utc DESC, id DESC LIMIT ?",
@@ -282,7 +305,9 @@ class TelemetryDB:
         )
 
     def get_recent_parsed_rows(self, limit: int = 20) -> list[sqlite3.Row]:
-        """Return the most recent parsed rows for inspection/debugging."""
+        """
+        Return the most recent parsed rows for inspection/debugging.
+        """
         return list(
             self.conn.execute(
                 "SELECT * FROM parsed_frames ORDER BY timestamp_utc DESC, id DESC LIMIT ?",
@@ -294,8 +319,8 @@ class TelemetryDB:
         """
         Delete one raw row by ID.
 
-        This is used for rows proven to be permanently malformed so the parser
-        does not retry them forever.
+        This is used for rows proven to be permanently malformed so the
+        parser does not retry them forever.
         """
         self.conn.execute("DELETE FROM raw_frames WHERE id = ?", (raw_frame_id,))
         self.conn.commit()
@@ -304,7 +329,8 @@ class TelemetryDB:
         """
         Delete all parsed rows for one NORAD ID.
 
-        This supports a full reparse from raw data after decoder logic changes.
+        This supports a full reparse from raw data after decoder logic 
+        changes.
 
         Returns
         -------
@@ -322,7 +348,8 @@ class TelemetryDB:
 
     def get_available_numeric_fields(self, apid: int | None = None) -> list[str]:
         """
-        Inspect stored ``parsed_json`` payloads and list numeric leaf fields.
+        Inspect stored 'parsed_json' payloads and list numeric leaf 
+        fields.
 
         Parameters
         ----------
@@ -349,8 +376,9 @@ class TelemetryDB:
         """
         Recursively collect dotted field paths for numeric leaf values.
 
-        The implementation intentionally ignores booleans because ``bool`` is a
-        subclass of ``int`` in Python and would otherwise pollute the list.
+        The implementation intentionally ignores booleans because 'bool' 
+        is a subclass of 'int' in Python and would otherwise pollute the 
+        list.
         """
         if isinstance(obj, dict):
             for key, value in obj.items():
@@ -366,3 +394,5 @@ class TelemetryDB:
 
         if isinstance(obj, (int, float)) and not isinstance(obj, bool):
             out.add(prefix)
+
+# ----------------------------------------------------------------------

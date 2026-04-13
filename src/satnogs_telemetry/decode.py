@@ -1,48 +1,49 @@
 """
-Decode and parser utilities for SatNOGS telemetry.
+Title: decode.py
+Authors: Aldo Aguilar
+Date: 2026-04-12
+Description: Decode and parser utilities for SatNOGS telemetry.
 
-Responsibilities
+Functionalities
 ----------------
-- load decoder mapping from config.toml
-- prompt the user to choose a .ksy decoder when needed
-- compile Kaitai decoders into Python and cache them locally
-- parse raw SatNOGS packets into AX.25 / CCSDS / decoded payload records
-- delete malformed raw rows during parse so they are not retried forever
+- Load decoder mapping from config.toml
+- Prompt the user to choose a .ksy decoder when needed
+- Compile Kaitai decoders into Python and cache them locally
+- Parse raw SatNOGS packets into AX.25 / CCSDS / decoded payload records
+- Delete malformed raw rows during parse so they are not retried forever
 """
 
+# System imports
 from __future__ import annotations
-
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import importlib.util
 import json
 import os
-from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import subprocess
 from typing import Any
 from types import SimpleNamespace
 
+# Third-party imports
 import tomllib
 import tomli_w
-from datetime import datetime, timezone
 
-# ---------------------------------------------------------------------
-# Hard-coded runtime paths / constants
-# ---------------------------------------------------------------------
-
+# Global path constants
 CONFIG_PATH = Path("config.toml")
 DECODER_SEARCH_ROOT = Path("tools/satnogs-decoders")
 DECODERS_DIR = Path("decoders")
 
-# Try the batch/cmd wrappers first on Windows.
+# Kaitai compiler candidates to look for on PATH, in order of preference
 KSC_CANDIDATES = [
     "kaitai-struct-compiler.bat",
     "kaitai-struct-compiler.cmd",
     "kaitai-struct-compiler",
 ]
 
-# These are deterministic malformed-frame errors. If one of these occurs,
-# the raw row can safely be deleted because it will never become parseable.
+# Deterministic malformed-frame errors. If one of these occurs, the raw
+# row can safely be deleted because it will never become parseable.
 MALFORMED_FRAME_ERRORS = (
     "AX.25 frame is too short",
     "AX.25 frame must contain destination and source addresses",
@@ -51,33 +52,26 @@ MALFORMED_FRAME_ERRORS = (
     "CCSDS packet is too short to contain a primary header",
 )
 
-# ---------------------------------------------------------------------
-# Small data containers
-# ---------------------------------------------------------------------
+# ---------------------------- Data classes ----------------------------
 
 @dataclass(slots=True)
 class DecoderRef:
     """
     Reference to a decoder definition before compilation.
     """
-
     ksy_path: Path
     root_class: str
-
 
 @dataclass(slots=True)
 class CompiledDecoder:
     """
     Reference to a compiled Python decoder.
     """
-
     generated_py: Path
     root_class: str
     buildinfo_path: Path
 
-# ----------------------------------------------------------------------
-# UTC helper
-# ----------------------------------------------------------------------
+# ----------------------------- UTC Helper -----------------------------
 
 def utc_now_iso() -> str:
     """
@@ -85,36 +79,7 @@ def utc_now_iso() -> str:
     """
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-# ---------------------------------------------------------------------
-# Config TOML helpers
-# ---------------------------------------------------------------------
-
-def _repo_relative(path: Path) -> str:
-    """
-    Return a path relative to the current working directory when possible.
-
-    This keeps the interactive decoder list short and readable.
-    """
-    try:
-        return str(path.resolve().relative_to(Path.cwd().resolve()))
-    except Exception:
-        return str(path)
-
-
-def _default_root_class_from_ksy(ksy_path: Path) -> str:
-    """
-    Derive the default root class from the .ksy filename stem.
-
-    Examples
-    --------
-    cosmo.ksy  -> Cosmo
-    canvas.ksy -> Canvas
-    """
-    stem = ksy_path.stem.strip()
-    if not stem:
-        return "Decoder"
-    return stem[:1].upper() + stem[1:]
-
+# ------------------------ Config TOML Helpers -------------------------
 
 def load_decoder_mapping(config_path: Path = CONFIG_PATH) -> dict[int, dict[str, str]]:
     """
@@ -156,13 +121,10 @@ def load_decoder_mapping(config_path: Path = CONFIG_PATH) -> dict[int, dict[str,
 
     return result
 
-
-def save_decoder_mapping(
-    norad_cat_id: int,
-    ksy_path: str,
-    root_class: str,
-    config_path: Path = CONFIG_PATH,
-) -> None:
+def save_decoder_mapping(norad_cat_id: int, 
+                         ksy_path: str, 
+                         root_class: str, 
+                         config_path: Path = CONFIG_PATH) -> None:
     """
     Save one NORAD -> decoder mapping into config.toml.
     """
@@ -182,8 +144,7 @@ def save_decoder_mapping(
     with config_path.open("wb") as f:
         f.write(tomli_w.dumps(data).encode("utf-8"))
 
-
-def scan_ksy_files(search_root: Path = DECODER_SEARCH_ROOT) -> list[Path]:
+def _scan_ksy_files(search_root: Path = DECODER_SEARCH_ROOT) -> list[Path]:
     """
     Find all .ksy files under the decoder tree.
     """
@@ -192,6 +153,31 @@ def scan_ksy_files(search_root: Path = DECODER_SEARCH_ROOT) -> list[Path]:
 
     return sorted(search_root.rglob("*.ksy"))
 
+def _repo_relative(path: Path) -> str:
+    """
+    Return a path relative to the current working directory when 
+    possible.
+
+    This keeps the interactive decoder list short and readable.
+    """
+    try:
+        return str(path.resolve().relative_to(Path.cwd().resolve()))
+    except Exception:
+        return str(path)
+    
+def _default_root_class_from_ksy(ksy_path: Path) -> str:
+    """
+    Derive the default root class from the .ksy filename stem.
+
+    Examples
+    --------
+    cosmo.ksy  -> Cosmo
+    canvas.ksy -> Canvas
+    """
+    stem = ksy_path.stem.strip()
+    if not stem:
+        return "Decoder"
+    return stem[:1].upper() + stem[1:]
 
 def prompt_for_decoder_choice(norad_cat_id: int) -> tuple[str, str]:
     """
@@ -200,7 +186,7 @@ def prompt_for_decoder_choice(norad_cat_id: int) -> tuple[str, str]:
     The displayed list uses repo-relative paths for readability.
     The root class is inferred automatically from the filename stem.
     """
-    ksy_files = scan_ksy_files()
+    ksy_files = _scan_ksy_files()
     if not ksy_files:
         raise FileNotFoundError(f"No .ksy files found under {DECODER_SEARCH_ROOT}")
 
@@ -227,7 +213,6 @@ def prompt_for_decoder_choice(norad_cat_id: int) -> tuple[str, str]:
     print(f"Using root class: {root_class}")
     return rel_path, root_class
 
-
 def _find_kaitai_compiler() -> str:
     """
     Resolve the Kaitai compiler from PATH.
@@ -245,10 +230,7 @@ def _find_kaitai_compiler() -> str:
         "kaitai-struct-compiler, kaitai-struct-compiler.bat"
     )
 
-
-# ---------------------------------------------------------------------
-# Decoder resolution / compilation
-# ---------------------------------------------------------------------
+# -------------------------- Decoder Manager ---------------------------
 
 class DecoderManager:
     """
@@ -263,7 +245,8 @@ class DecoderManager:
         """
         Resolve a decoder for a NORAD ID.
 
-        If none is configured yet, prompt the user once and persist the mapping.
+        If none is configured yet, prompt the user once and persist the 
+        mapping.
         """
         mapping = load_decoder_mapping()
         decoder_info = mapping.get(norad_cat_id)
@@ -282,8 +265,9 @@ class DecoderManager:
 
         ksy_path = Path(decoder_info["ksy_path"])
         if not ksy_path.is_absolute():
-            # Resolve relative to config.toml / repo root so launching the app
-            # from a different directory does not break decoder paths.
+            # Resolve relative to config.toml / repo root so launching 
+            # the app from a different directory does not break decoder
+            # paths.
             ksy_path = (CONFIG_PATH.parent / ksy_path).resolve()
 
         root_class = decoder_info["root_class"].strip()
@@ -300,8 +284,8 @@ class DecoderManager:
         """
         Compile a decoder if needed, otherwise reuse the cached version.
 
-        This method first checks an in-memory cache for the current process,
-        then checks the on-disk build cache via .buildinfo.json.
+        This method first checks an in-memory cache for the current 
+        process, then checks the on-disk build cache via .buildinfo.json.
         """
         cached = self._compiled_cache.get(norad_cat_id)
         if cached is not None and cached.generated_py.exists() and cached.buildinfo_path.exists():
@@ -335,10 +319,12 @@ class DecoderManager:
 
     def _compile_ksy(self, ksy_path: Path, out_dir: Path) -> None:
         """
-        Invoke Kaitai Struct Compiler from the project root using repo-relative paths.
+        Invoke Kaitai Struct Compiler from the project root using 
+        repo-relative paths.
 
-        On Windows, if the resolved compiler is a .bat/.cmd launcher, run it
-        through cmd.exe so it launches correctly and relative paths work.
+        On Windows, if the resolved compiler is a .bat/.cmd launcher, 
+        run it through cmd.exe so it launches correctly and relative 
+        paths work.
         """
         compiler = _find_kaitai_compiler()
 
@@ -417,12 +403,8 @@ class DecoderManager:
                 f"{detail_text}"
             ) from exc
 
-    def _is_cache_valid(
-        self,
-        decoder: DecoderRef,
-        generated_py: Path,
-        buildinfo_path: Path,
-    ) -> bool:
+    def _is_cache_valid(self, decoder: DecoderRef, generated_py: Path, 
+                        buildinfo_path: Path) -> bool:
         """
         Check whether the cached compiled decoder is still valid.
         """
@@ -445,12 +427,8 @@ class DecoderManager:
             and info.get("root_class") == decoder.root_class
         )
 
-    def _write_buildinfo(
-        self,
-        decoder: DecoderRef,
-        generated_py: Path,
-        buildinfo_path: Path,
-    ) -> None:
+    def _write_buildinfo(self, decoder: DecoderRef, generated_py: Path, 
+                         buildinfo_path: Path) -> None:
         """
         Write decoder cache metadata.
         """
@@ -462,17 +440,13 @@ class DecoderManager:
         }
         buildinfo_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-
-# ---------------------------------------------------------------------
-# Low-level packet parsing helpers
-# ---------------------------------------------------------------------
+# ------------------ Low-level packet parsing helpers ------------------
 
 def hex_to_bytes(hex_str: str) -> bytes:
     """
     Convert a hex string into raw bytes.
     """
     return bytes.fromhex(hex_str)
-
 
 def extract_raw_fields_for_indexing(raw_json: dict[str, Any]) -> tuple[str, str]:
     """
@@ -488,7 +462,6 @@ def extract_raw_fields_for_indexing(raw_json: dict[str, Any]) -> tuple[str, str]
 
     return timestamp_utc, observer
 
-
 def _decode_ax25_callsign(addr_bytes: bytes) -> str:
     """
     Decode one 7-byte AX.25 address field into a callsign string.
@@ -502,7 +475,6 @@ def _decode_ax25_callsign(addr_bytes: bytes) -> str:
     if ssid:
         return f"{callsign}-{ssid}"
     return callsign
-
 
 def extract_ax25_and_ccsds(frame_hex: str) -> dict[str, str]:
     """
@@ -544,7 +516,6 @@ def extract_ax25_and_ccsds(frame_hex: str) -> dict[str, str]:
         "raw_ccsds_packet_hex": info_field.hex().upper(),
     }
 
-
 def parse_ccsds_primary_header(packet_hex: str) -> dict[str, int]:
     """
     Parse the 6-byte CCSDS primary header.
@@ -571,10 +542,7 @@ def parse_ccsds_primary_header(packet_hex: str) -> dict[str, int]:
         "sequence_count": sequence_count,
     }
 
-
-# ---------------------------------------------------------------------
-# Dynamic loader for compiled Python decoders
-# ---------------------------------------------------------------------
+# --------------------------- Decoder Loader ---------------------------
 
 class DecoderLoader:
     """
@@ -584,19 +552,18 @@ class DecoderLoader:
     def __init__(self) -> None:
         self._module_cache: dict[str, Any] = {}
 
-    def parse_with_decoder(
-        self,
-        parser_path: str,
-        root_class: str,
-        packet_hex: str,
-    ) -> dict[str, Any]:
+    def parse_with_decoder(self, 
+                           parser_path: str, 
+                           root_class: str, 
+                           packet_hex: str,) -> dict[str, Any]:
         """
         Load the compiled decoder module and parse a packet with it.
         """
         module = self._load_module(parser_path)
         parser_cls = getattr(module, root_class, None)
         if parser_cls is None:
-            raise AttributeError(f"Root class '{root_class}' not found in {parser_path}")
+            raise AttributeError(f"Root class '{root_class}' not found "
+                                 f"in {parser_path}")
 
         obj = parser_cls.from_bytes(hex_to_bytes(packet_hex))
         return self._to_builtin(obj)
@@ -623,7 +590,8 @@ class DecoderLoader:
 
     def _to_builtin(self, value: Any, depth: int = 0) -> Any:
         """
-        Convert parsed Kaitai objects into plain Python types suitable for JSON.
+        Convert parsed Kaitai objects into plain Python types suitable 
+        for JSON.
         """
         if depth > 25:
             return str(value)
@@ -658,16 +626,17 @@ class DecoderLoader:
         return result
 
 
-# ---------------------------------------------------------------------
-# High-level packet decode service
-# ---------------------------------------------------------------------
+# -------------------------- Decoder Service ---------------------------
 
 class DecoderService:
     """
     High-level raw-packet decode service.
 
     This converts raw SatNOGS rows from the database into parsed rows,
-    inserts successful parses, and deletes deterministically malformed rows.
+    inserts successful parses, and deletes deterministically malformed 
+    rows. It uses the DecoderManager to resolve and compile decoders as 
+    needed, and the DecoderLoader to dynamically load and run the 
+    compiled decoders to parse packets.
     """
 
     def __init__(self, db) -> None:
@@ -681,9 +650,11 @@ class DecoderService:
         self.decoder_loader = DecoderLoader()
         self.decoder_manager = DecoderManager()
 
-    def parse_unparsed(self, norad_cat_id: int, log=print) -> dict[str, Any]:
+    def parse_unparsed(self, norad_cat_id: int, 
+                       log=print) -> dict[str, Any]:
         """
-        Parse all raw rows for this NORAD that do not yet have parsed rows.
+        Parse all raw rows for this NORAD that do not yet have parsed 
+        rows.
 
         Returns a dict summary.
         """
@@ -738,12 +709,11 @@ class DecoderService:
 
         return result
 
-    def decode_raw_packet(
-        self,
-        raw_frame_id: int,
-        norad_cat_id: int,
-        raw_json: dict[str, Any],
-    ) -> dict[str, Any]:
+    def decode_raw_packet(self,
+                          raw_frame_id: int,
+                          norad_cat_id: int,
+                          raw_json: dict[str, Any]
+                          ) -> dict[str, Any]:
         """
         Decode one raw SatNOGS packet into parsed metadata + payload.
         """
@@ -842,3 +812,5 @@ class DecoderService:
         safe to delete from the raw queue.
         """
         return any(token in err_text for token in MALFORMED_FRAME_ERRORS)
+    
+# ----------------------------------------------------------------------
