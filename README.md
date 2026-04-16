@@ -2,8 +2,6 @@
 
 Command-line tool to download telemetry from the SatNOGS database, store the raw frames locally, decode them with Kaitai-based decoders, inspect parsed packets, export CSV files, and plot decoded fields.
 
-This README is written for a new user setting up the project for the first time.
-
 ## What the project does
 
 For a given satellite NORAD ID, this project can:
@@ -38,13 +36,14 @@ You need:
 - Poetry
 - Kaitai Struct Compiler available on your system `PATH`
 - a SatNOGS API token if the API requires authentication for your usage
+- An SSH key for GitHub to make cloning easier
 
 ## Installation
 
 ### 1. Clone the repository
 
 ```bash
-git clone <your-repo-url>
+git clone git@github.com:aldo-aguilar-n/satnogs-telemetry.git
 cd satnogs-telemetry
 ```
 
@@ -56,9 +55,9 @@ poetry install
 
 ### 3. Install Kaitai Struct Compiler
 
-This project uses the Python Kaitai runtime through Poetry, but it also needs the external compiler executable to generate decoders from `.ksy` files.
+This project uses the Python Kaitai runtime through Poetry, but it also needs the external compiler executable to generate decoders from `.ksy` files. The compiler is available at: https://kaitai.io/
 
-Verify that the compiler is available in your terminal:
+After installing it. Verify that the compiler is available in your terminal:
 
 ```bash
 kaitai-struct-compiler --version
@@ -75,21 +74,13 @@ If this command is not found, install Kaitai Struct Compiler and make sure it is
 
 ### 4. Create a `.env` file with your SatNOGS token
 
-Create a file named `.env` in the project root:
+Create a file named `.env` in the project root with the following contents:
 
 ```text
 SATNOGS_API_TOKEN=your_token_here
 ```
 
-The CLI loads `.env` automatically.
-
-Also make sure `.env` is ignored by git.
-
-Example `.gitignore` entry:
-
-```text
-.env
-```
+This is required by the app to be able to download data from SatNOGS.
 
 ## First-time setup checklist
 
@@ -115,16 +106,18 @@ The most common workflow is:
 The default command does steps 1 and 2 together:
 
 ```bash
-poetry run satnogs-telemetry --norad 98386
+poetry run satnogs-telemetry --norad <norad_id>
 ```
 
 What this does:
 
-- opens or creates `data/98386.sqlite3`
+- opens or creates `data/<norad_id>.sqlite3`
 - downloads only new raw frames not already stored
 - compiles the configured decoder if needed
 - parses raw frames that do not yet have parsed rows
 - stores parsed output in the database
+
+This looks for any available data in SatNOGS for the specific NORAD ID, and the download process could take a while. For quick analysis. The commands detailed below might be more useful:
 
 ## Command reference
 
@@ -159,7 +152,7 @@ poetry run satnogs-telemetry sync-raw-range \
   --end 2026-04-12T00:00:00Z
 ```
 
-This is useful for backfilling or re-downloading a known period.
+This is useful for backfilling or re-downloading a known period. Some SatNOGS users upload data frames post-mortem (i.e., not in real time during a pass), and these data frames are typically tagged with the wrong timestamp (SatNOGS tags frames at upload). So this command is useful for backfilling any gaps in the data caused by these incorrect timestamps.
 
 ### Parse only rows that are not parsed yet
 
@@ -288,6 +281,8 @@ For example:
 csv/98386/apid_201.csv
 csv/98386/apid_202.csv
 ```
+
+Note: This CSV exporter currently organizes columns alphabetically rather than following the parameter order defined in the frame decoder. This will be fixed in future iterations.
 
 ## How parsed data is organized
 
