@@ -25,7 +25,12 @@ from dotenv import load_dotenv
 # Local imports
 from .csv_export import export_apid_csvs
 from .database import TelemetryDB
-from .decode import DecoderManager, DecoderService, load_decoder_mapping
+from .decode import (
+    DecoderManager,
+    DecoderService,
+    create_and_save_conversion_lookup,
+    load_decoder_mapping,
+)
 from .download import DownloadService
 from .plotting import plot_field_to_png
 
@@ -60,6 +65,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # Global argument
     parser.add_argument("--norad", type=int, 
                         help="NORAD catalog ID")
+    parser.add_argument("--conv_to_eng", action="store_true",
+                        help="Apply saved engineering conversions before storing parsed JSON")
     
     # Subparsers for specific commands
     subparsers = parser.add_subparsers(dest="command")
@@ -92,6 +99,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_parse.add_argument("--norad", required=True, type=int, 
                          help="NORAD catalog ID")
+    p_parse.add_argument("--conv_to_eng", action="store_true",
+                         help="Apply saved engineering conversions before storing parsed JSON")
 
     # Arguments for the 'reparse-all' command
     p_reparse_all = subparsers.add_parser(
@@ -100,6 +109,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_reparse_all.add_argument("--norad", required=True, type=int, 
                                help="NORAD catalog ID")
+    p_reparse_all.add_argument("--conv_to_eng", action="store_true",
+                               help="Apply saved engineering conversions before storing parsed JSON")
+
+    # Arguments for the 'load-conversions' command
+    p_load_conversions = subparsers.add_parser(
+        "load-conversions",
+        help="Load a beacon definition CSV and save a conversion lookup table"
+    )
+    p_load_conversions.add_argument("--norad", required=True, type=int,
+                                    help="NORAD catalog ID")
+    p_load_conversions.add_argument("--input", required=True,
+                                    help="Input beacon definition CSV")
 
     # Arguments for the 'export-csv' command
     p_export_csv = subparsers.add_parser(
@@ -227,7 +248,8 @@ def cmd_default_run(args: argparse.Namespace) -> int:
 
         # Parse unparsed raw rows
         parse_result = decoder.parse_unparsed(norad_cat_id=args.norad, 
-                                              log=_print)
+                                              log=_print,
+                                              conv_to_eng=args.conv_to_eng)
         _print("Parse result:")
         _print(json.dumps(parse_result, indent=2))
 
@@ -289,7 +311,8 @@ def cmd_parse_unparsed(args: argparse.Namespace) -> int:
         _ensure_decoder_selected(args.norad)
         # Parse unparsed raw rows
         result = decoder.parse_unparsed(norad_cat_id=args.norad, 
-                                        log=_print)
+                                        log=_print,
+                                        conv_to_eng=args.conv_to_eng)
         _print(json.dumps(result, indent=2))
         # Return exit code
         return 0 if not _result_errors(result) else 1
@@ -312,12 +335,24 @@ def cmd_reparse_all(args: argparse.Namespace) -> int:
                f"{args.norad}")
         # Reparse all raw rows
         result = decoder.parse_unparsed(norad_cat_id=args.norad, 
-                                        log=_print)
+                                        log=_print,
+                                        conv_to_eng=args.conv_to_eng)
         _print(json.dumps(result, indent=2))
         # Return exit code
         return 0 if not _result_errors(result) else 1
     finally:
         db.close()
+
+def cmd_load_conversions(args: argparse.Namespace) -> int:
+    """
+    Load a beacon definition CSV and save the per-NORAD conversion lookup.
+    """
+    outpath = create_and_save_conversion_lookup(
+        norad_cat_id=args.norad,
+        csv_path=args.input,
+    )
+    _print(f"Saved conversion lookup: {outpath}")
+    return 0
 
 def cmd_export_csv(args: argparse.Namespace) -> int:
     """
@@ -436,6 +471,8 @@ def main() -> int:
         return cmd_parse_unparsed(args)
     if args.command == "reparse-all":
         return cmd_reparse_all(args)
+    if args.command == "load-conversions":
+        return cmd_load_conversions(args)
     if args.command == "export-csv":
         return cmd_export_csv(args)
     if args.command == "show-recent-raw":

@@ -16,6 +16,8 @@ Functionalities
 # System imports
 from __future__ import annotations
 from dataclasses import dataclass
+import csv
+import re
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -34,6 +36,9 @@ import tomli_w
 CONFIG_PATH = Path("config.toml")
 DECODER_SEARCH_ROOT = Path("tools/satnogs-decoders")
 DECODERS_DIR = Path("decoders")
+
+CONVERSION_SUFFIX = "_conversions.json"
+
 
 # Kaitai compiler candidates to look for on PATH, in order of preference
 KSC_CANDIDATES = [
@@ -212,6 +217,171 @@ def prompt_for_decoder_choice(norad_cat_id: int) -> tuple[str, str]:
 
     print(f"Using root class: {root_class}")
     return rel_path, root_class
+
+def conversion_lookup_path(norad_cat_id: int) -> Path:
+    """Return the per-NORAD conversion lookup path."""
+    return DECODERS_DIR / str(norad_cat_id) / f"{norad_cat_id}{CONVERSION_SUFFIX}"
+
+
+def _normalize_lookup_field_name(name: str) -> str:
+    """Normalize field names so CSV ItemName and decoder JSON keys match."""
+    return str(name or "").strip().upper()
+
+
+def _clean_units(units: str) -> str:
+    """Reduce verbose unit labels like 'Volts (V)' to 'V' when possible."""
+    text = str(units or "").replace(" ", " ").strip()
+    if not text:
+        return ""
+    match = re.search(r"\(([^()]+)\)\s*$", text)
+    if match:
+        return match.group(1).strip()
+    return " ".join(text.split())
+
+
+def _parse_linear_conversion(conv: str) -> dict[str, float] | None:
+    """Parse simple linear conversion strings like 'C0=... C1=...'."""
+    text = str(conv or "").strip()
+    if not text or "C1=" not in text:
+        return None
+
+    coeffs: dict[str, float] = {}
+    for key, value in re.findall(r"(C\d+)\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?\d+)?)", text):
+        try:
+            coeffs[key] = float(value)
+        except Exception:
+            continue
+
+    if not coeffs or "C1" not in coeffs:
+        return None
+
+    return {
+        "c0": float(coeffs.get("C0", 0.0)),
+        "c1": float(coeffs["C1"]),
+    }
+
+
+def _parse_enum_conversion(conv: str) -> dict[str, str] | None:
+    """Parse enum strings like '0/IDLE 1/ACTIVE'."""
+    text = " ".join(str(conv or "").replace(" ", " ").split())
+    if not text or "C1=" in text or "/" not in text:
+        return None
+
+    pairs = re.findall(r"([+-]?\d+)\s*/\s*([^/]+?)(?=\s+[+-]?\d+\s*/|$)", text)
+    if not pairs:
+        return None
+
+    enum_map: dict[str, str] = {}
+    for raw, name in pairs:
+        enum_map[str(int(raw))] = name.strip()
+    return enum_map or None
+
+
+def build_conversion_lookup_from_csv(csv_path: str | Path) -> dict[str, dict[str, Any]]:
+    """Build a field-name -> conversion lookup table from a beacon CSV."""
+    lookup: dict[str, dict[str, Any]] = {}
+    with Path(csv_path).open("r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            field_name = _normalize_lookup_field_name(row.get("ItemName", ""))
+            if not field_name:
+                continue
+
+            entry: dict[str, Any] = {
+                "units": _clean_units(row.get("Units", "")),
+            }
+
+            linear = _parse_linear_conversion(row.get("Conversion", ""))
+            enum_map = _parse_enum_conversion(row.get("Conversion", ""))
+
+            if linear is not None:
+                entry["kind"] = "linear"
+                entry["c0"] = linear["c0"]
+                entry["c1"] = linear["c1"]
+            elif enum_map is not None:
+                entry["kind"] = "enum"
+                entry["map"] = enum_map
+            else:
+                continue
+
+            lookup[field_name] = entry
+
+    return lookup
+
+
+def save_conversion_lookup(norad_cat_id: int, lookup: dict[str, dict[str, Any]]) -> Path:
+    """Persist the conversion lookup under decoders/<norad>/."""
+    outpath = conversion_lookup_path(norad_cat_id)
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    outpath.write_text(json.dumps(lookup, indent=2, ensure_ascii=False), encoding="utf-8")
+    return outpath
+
+
+def load_conversion_lookup(norad_cat_id: int) -> dict[str, dict[str, Any]]:
+    """Load a previously saved conversion lookup for one NORAD ID."""
+    path = conversion_lookup_path(norad_cat_id)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def create_and_save_conversion_lookup(norad_cat_id: int, csv_path: str | Path) -> Path:
+    """Build and save the per-NORAD conversion lookup from CSV."""
+    lookup = build_conversion_lookup_from_csv(csv_path)
+    return save_conversion_lookup(norad_cat_id=norad_cat_id, lookup=lookup)
+
+
+def _apply_conversion_entry(raw_value: Any, entry: dict[str, Any]) -> Any:
+    """Convert one raw leaf value using one lookup entry."""
+    kind = str(entry.get("kind", "")).strip().lower()
+
+    if kind == "linear" and isinstance(raw_value, (int, float, bool)):
+        numeric_raw = int(raw_value) if isinstance(raw_value, bool) else raw_value
+        c0 = float(entry.get("c0", 0.0))
+        c1 = float(entry.get("c1", 1.0))
+        return c0 + (c1 * float(numeric_raw))
+
+    if kind == "enum":
+        numeric_raw = int(raw_value) if isinstance(raw_value, bool) else raw_value
+        try:
+            return entry.get("map", {}).get(str(int(numeric_raw)), raw_value)
+        except Exception:
+            return raw_value
+
+    return raw_value
+
+
+def apply_conversions_to_parsed_json(parsed_json: Any, lookup: dict[str, dict[str, Any]]) -> Any:
+    """Recursively apply field conversions to decoded JSON leaf values."""
+    if not lookup:
+        return parsed_json
+
+    def _convert(node: Any, parent_key: str = "") -> Any:
+        if isinstance(node, dict):
+            converted: dict[str, Any] = {}
+            for key, value in node.items():
+                if str(key).startswith("_"):
+                    converted[key] = _convert(value, str(key))
+                    continue
+
+                if isinstance(value, (dict, list)):
+                    converted[key] = _convert(value, str(key))
+                    continue
+
+                entry = lookup.get(_normalize_lookup_field_name(key))
+                converted[key] = _apply_conversion_entry(value, entry) if entry else value
+            return converted
+
+        if isinstance(node, list):
+            return [_convert(item, parent_key) for item in node]
+
+        return node
+
+    return _convert(parsed_json)
+
 
 def _find_kaitai_compiler() -> str:
     """
@@ -651,7 +821,8 @@ class DecoderService:
         self.decoder_manager = DecoderManager()
 
     def parse_unparsed(self, norad_cat_id: int, 
-                       log=print) -> dict[str, Any]:
+                       log=print,
+                       conv_to_eng: bool = False) -> dict[str, Any]:
         """
         Parse all raw rows for this NORAD that do not yet have parsed 
         rows.
@@ -685,6 +856,7 @@ class DecoderService:
                     raw_frame_id=int(row["id"]),
                     norad_cat_id=norad_cat_id,
                     raw_json=raw_json,
+                    conv_to_eng=conv_to_eng,
                 )
 
                 parsed = SimpleNamespace(**parsed_dict)
@@ -712,7 +884,8 @@ class DecoderService:
     def decode_raw_packet(self,
                           raw_frame_id: int,
                           norad_cat_id: int,
-                          raw_json: dict[str, Any]
+                          raw_json: dict[str, Any],
+                          conv_to_eng: bool = False
                           ) -> dict[str, Any]:
         """
         Decode one raw SatNOGS packet into parsed metadata + payload.
@@ -734,6 +907,7 @@ class DecoderService:
         parsed_json: dict[str, Any] | None = None
         parser_path = ""
         parser_root_class = ""
+        conversion_lookup = load_conversion_lookup(norad_cat_id) if conv_to_eng else {}
 
         decoder_ref = self.decoder_manager.resolve_decoder(norad_cat_id)
         if decoder_ref is not None:
@@ -769,6 +943,9 @@ class DecoderService:
                     )
 
                     if isinstance(parsed_json, dict):
+                        if conv_to_eng and conversion_lookup:
+                            parsed_json = apply_conversions_to_parsed_json(parsed_json, conversion_lookup)
+                            parsed_json["_conv_to_eng"] = True
                         parsed_json["_decode_mode"] = mode
                     else:
                         parsed_json = {

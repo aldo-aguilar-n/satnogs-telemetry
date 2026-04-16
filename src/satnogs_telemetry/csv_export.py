@@ -165,13 +165,17 @@ def order_columns(rows: list[dict[str, Any]]) -> list[str]:
     - observer
     - primary header fields
     - secondary header fields
-    - user data fields
+    - user data fields in first-seen order
     """
-    all_columns: set[str] = set()
+    seen_in_order: list[str] = []
+    seen_set: set[str] = set()
     for row in rows:
-        all_columns.update(row.keys())
+        for key in row.keys():
+            if key not in seen_set:
+                seen_set.add(key)
+                seen_in_order.append(key)
 
-    leading = [c for c in ["timestamp", "observer"] if c in all_columns]
+    leading = [c for c in ["timestamp", "observer"] if c in seen_set]
 
     primary_order = [
         "ccsds_version",
@@ -189,11 +193,11 @@ def order_columns(rows: list[dict[str, Any]]) -> list[str]:
         "padding",
     ]
 
-    primary_present = [c for c in primary_order if c in all_columns]
-    secondary_present = [c for c in secondary_order if c in all_columns]
+    primary_present = [c for c in primary_order if c in seen_set]
+    secondary_present = [c for c in secondary_order if c in seen_set]
 
     already_used = set(leading + primary_present + secondary_present)
-    user_data_columns = sorted(c for c in all_columns if c not in already_used)
+    user_data_columns = [c for c in seen_in_order if c not in already_used]
     return leading + primary_present + secondary_present + user_data_columns
 
 def export_apid_csvs(db, norad_cat_id: int, outdir: str) -> list[str]:
