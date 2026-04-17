@@ -6,3 +6,4 @@ data/
 decoders/
 plots/
 csv/
+config.toml

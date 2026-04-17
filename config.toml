@@ -1,7 +1,0 @@
-[satellites.68460.decoder]
-ksy_path = "tools\\satnogs-decoders\\ksy\\cosmo.ksy"
-root_class = "Cosmo"
-
-[satellites.98338.decoder]
-ksy_path = "tools\\satnogs-decoders\\ksy\\canvas.ksy"
-root_class = "Canvas"
