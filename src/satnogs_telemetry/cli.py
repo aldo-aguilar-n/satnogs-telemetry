@@ -383,7 +383,6 @@ def cmd_show_recent_raw(args: argparse.Namespace) -> int:
         for row in rows:
             print("-" * 80)
             print(f"id         : {row['id']}")
-            print(f"norad      : {row['norad_cat_id']}")
             print(f"timestamp  : {row['timestamp_utc']}")
             print(f"observer   : {row['observer']}")
             print(f"raw_json   : {row['raw_json']}")
@@ -402,8 +401,7 @@ def cmd_show_recent_parsed(args: argparse.Namespace) -> int:
         rows = db.get_recent_parsed_rows(limit=args.limit)
         for row in rows:
             print("-" * 80)
-            print(f"id                   : {row['id']}")
-            print(f"norad                : {row['norad_cat_id']}")
+            print(f"raw_frame_id         : {row['raw_frame_id']}")
             print(f"timestamp            : {row['timestamp_utc']}")
             print(f"observer             : {row['observer']}")
             print(f"dest_callsign        : {row['dest_callsign']}")

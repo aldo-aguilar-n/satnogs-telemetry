@@ -782,12 +782,12 @@ class DecoderLoader:
             return {str(k): self._to_builtin(v, depth + 1) for k, v in value.items()}
 
         result: dict[str, Any] = {}
-        for attr in dir(value):
+
+        # Use __dict__ instead of dir() so field order follows the order
+        # in which Kaitai populated the instance attributes, rather than
+        # alphabetical order returned by dir().
+        for attr, attr_value in getattr(value, "__dict__", {}).items():
             if attr.startswith("_"):
-                continue
-            try:
-                attr_value = getattr(value, attr)
-            except Exception:
                 continue
             if callable(attr_value):
                 continue
@@ -840,7 +840,6 @@ class DecoderService:
         }
 
         rows = self.db.iter_unparsed_raw_rows()
-        rows = [row for row in rows if int(row["norad_cat_id"]) == int(norad_cat_id)]
         result["total_seen"] = len(rows)
 
         if log:
@@ -860,7 +859,7 @@ class DecoderService:
                 )
 
                 parsed = SimpleNamespace(**parsed_dict)
-                self.db.insert_parsed_packet(parsed=parsed, inserted_utc=utc_now_iso())
+                self.db.insert_parsed_packet(parsed=parsed)
                 result["parsed_inserted"] += 1
 
                 if log and idx % 100 == 0:
@@ -968,7 +967,6 @@ class DecoderService:
 
         return {
             "raw_frame_id": raw_frame_id,
-            "norad_cat_id": norad_cat_id,
             "timestamp_utc": timestamp_utc,
             "observer": observer,
             "dest_callsign": ax25["dest_callsign"],
@@ -978,8 +976,6 @@ class DecoderService:
             "ccsds_sequence_count": sequence_count,
             "raw_ccsds_packet_hex": ax25["raw_ccsds_packet_hex"],
             "parsed_json": parsed_json,
-            "parser_path": parser_path,
-            "parser_root_class": parser_root_class,
         }
 
     @staticmethod

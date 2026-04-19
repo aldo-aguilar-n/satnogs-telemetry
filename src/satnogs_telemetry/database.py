@@ -37,8 +37,6 @@ class RawPacket:
 
     Parameters
     ----------
-    norad_cat_id
-        NORAD catalog ID for the satellite.
     timestamp_utc
         Metadata timestamp reported by SatNOGS.
     observer
@@ -47,7 +45,6 @@ class RawPacket:
         Full raw SatNOGS JSON packet. This is stored as-is in the 
         database.
     """
-    norad_cat_id: int
     timestamp_utc: str
     observer: str
     raw_json: dict[str, Any]
@@ -62,7 +59,6 @@ class ParsedPacket:
     succeeded but mission-specific decoding failed.
     """
     raw_frame_id: int
-    norad_cat_id: int
     timestamp_utc: str
     observer: str
     dest_callsign: str
@@ -72,8 +68,6 @@ class ParsedPacket:
     ccsds_sequence_count: int | None
     raw_ccsds_packet_hex: str
     parsed_json: dict[str, Any] | None
-    parser_path: str = ""
-    parser_root_class: str = ""
 
 @dataclass(slots=True)
 class SyncResult:
@@ -141,19 +135,14 @@ class TelemetryDB:
             """
             CREATE TABLE IF NOT EXISTS raw_frames (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                norad_cat_id INTEGER NOT NULL,
                 timestamp_utc TEXT NOT NULL,
                 observer TEXT NOT NULL,
                 raw_json TEXT NOT NULL,
-                inserted_utc TEXT NOT NULL,
-                source TEXT NOT NULL,
-                UNIQUE(norad_cat_id, timestamp_utc, observer, raw_json)
+                UNIQUE(timestamp_utc, observer, raw_json)
             );
 
             CREATE TABLE IF NOT EXISTS parsed_frames (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                raw_frame_id INTEGER NOT NULL UNIQUE,
-                norad_cat_id INTEGER NOT NULL,
+                raw_frame_id INTEGER PRIMARY KEY,
                 timestamp_utc TEXT NOT NULL,
                 observer TEXT NOT NULL,
                 dest_callsign TEXT NOT NULL,
@@ -163,9 +152,6 @@ class TelemetryDB:
                 ccsds_sequence_count INTEGER,
                 raw_ccsds_packet_hex TEXT NOT NULL,
                 parsed_json TEXT,
-                parser_path TEXT NOT NULL,
-                parser_root_class TEXT NOT NULL,
-                inserted_utc TEXT NOT NULL,
                 FOREIGN KEY(raw_frame_id) REFERENCES raw_frames(id) ON DELETE CASCADE
             );
 
@@ -176,8 +162,7 @@ class TelemetryDB:
         )
         self.conn.commit()
 
-    def insert_raw_packet(self, raw: RawPacket, inserted_utc: str, 
-                          source: str) -> tuple[int | None, bool]:
+    def insert_raw_packet(self, raw: RawPacket) -> tuple[int | None, bool]:
         """
         Insert one raw packet if it is not already present.
 
@@ -189,16 +174,12 @@ class TelemetryDB:
         """
         payload = json.dumps(raw.raw_json, ensure_ascii=False, separators=(",", ":"))
 
-        # The unique constraint is defined across NORAD, timestamp, 
-        # observer, and the full raw JSON text. We check first so the 
-        # caller can learn the existing row ID without raising an 
-        # exception.
         existing = self.conn.execute(
             """
             SELECT id FROM raw_frames
-            WHERE norad_cat_id = ? AND timestamp_utc = ? AND observer = ? AND raw_json = ?
+            WHERE timestamp_utc = ? AND observer = ? AND raw_json = ?
             """,
-            (raw.norad_cat_id, raw.timestamp_utc, raw.observer, payload),
+            (raw.timestamp_utc, raw.observer, payload),
         ).fetchone()
         if existing:
             return int(existing[0]), False
@@ -208,26 +189,23 @@ class TelemetryDB:
         cur = self.conn.execute(
             """
             INSERT INTO raw_frames (
-                norad_cat_id, timestamp_utc, observer, raw_json, inserted_utc, source
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                timestamp_utc, observer, raw_json
+            ) VALUES (?, ?, ?)
             """,
-            (raw.norad_cat_id, raw.timestamp_utc, raw.observer, payload, inserted_utc, source),
+            (raw.timestamp_utc, raw.observer, payload),
         )
         self.conn.commit()
         return int(cur.lastrowid), True
 
-    def insert_parsed_packet(self, parsed: ParsedPacket, inserted_utc: str) -> bool:
+    def insert_parsed_packet(self, parsed: ParsedPacket) -> bool:
         """
         Insert one parsed packet row if it does not already exist.
 
         Parsed rows are uniquely keyed by 'raw_frame_id' because each 
         raw row should produce at most one parsed row at a time.
         """
-        # Check if a parsed row already exists for this raw frame. We
-        # check first so the caller can know whether the row was new or 
-        # existing
         existing = self.conn.execute(
-            "SELECT id FROM parsed_frames WHERE raw_frame_id = ?",
+            "SELECT raw_frame_id FROM parsed_frames WHERE raw_frame_id = ?",
             (parsed.raw_frame_id,),
         ).fetchone()
         if existing:
@@ -240,15 +218,14 @@ class TelemetryDB:
         self.conn.execute(
             """
             INSERT INTO parsed_frames (
-                raw_frame_id, norad_cat_id, timestamp_utc, observer,
+                raw_frame_id, timestamp_utc, observer,
                 dest_callsign, src_callsign, raw_ax25_frame_hex,
                 ccsds_apid, ccsds_sequence_count, raw_ccsds_packet_hex,
-                parsed_json, parser_path, parser_root_class, inserted_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                parsed_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 parsed.raw_frame_id,
-                parsed.norad_cat_id,
                 parsed.timestamp_utc,
                 parsed.observer,
                 parsed.dest_callsign,
@@ -258,9 +235,6 @@ class TelemetryDB:
                 parsed.ccsds_sequence_count,
                 parsed.raw_ccsds_packet_hex,
                 parsed_json,
-                parsed.parser_path,
-                parsed.parser_root_class,
-                inserted_utc,
             ),
         )
         self.conn.commit()
@@ -287,7 +261,7 @@ class TelemetryDB:
             SELECT r.*
             FROM raw_frames r
             LEFT JOIN parsed_frames p ON p.raw_frame_id = r.id
-            WHERE p.id IS NULL
+            WHERE p.raw_frame_id IS NULL
             ORDER BY r.timestamp_utc ASC, r.id ASC
             """
         )
@@ -310,7 +284,7 @@ class TelemetryDB:
         """
         return list(
             self.conn.execute(
-                "SELECT * FROM parsed_frames ORDER BY timestamp_utc DESC, id DESC LIMIT ?",
+                "SELECT * FROM parsed_frames ORDER BY timestamp_utc DESC, raw_frame_id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         )
@@ -327,7 +301,7 @@ class TelemetryDB:
 
     def delete_parsed_rows_for_norad(self, norad_cat_id: int) -> int:
         """
-        Delete all parsed rows for one NORAD ID.
+        Delete all parsed rows in this per-NORAD database.
 
         This supports a full reparse from raw data after decoder logic 
         changes.
@@ -337,12 +311,9 @@ class TelemetryDB:
         int
             Number of parsed rows deleted.
         """
-        row = self.conn.execute(
-            "SELECT COUNT(*) FROM parsed_frames WHERE norad_cat_id = ?",
-            (norad_cat_id,),
-        ).fetchone()
+        row = self.conn.execute("SELECT COUNT(*) FROM parsed_frames").fetchone()
         count = int(row[0]) if row else 0
-        self.conn.execute("DELETE FROM parsed_frames WHERE norad_cat_id = ?", (norad_cat_id,))
+        self.conn.execute("DELETE FROM parsed_frames")
         self.conn.commit()
         return count
 

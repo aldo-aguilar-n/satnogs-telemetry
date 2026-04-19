@@ -21,24 +21,14 @@ import requests
 
 # Local imports
 from .database import RawPacket, SyncResult, TelemetryDB
-from datetime import datetime, timezone
 from .decode import extract_raw_fields_for_indexing
 
 # Global constants
 SATNOGS_BASE_URL = "https://db.satnogs.org/api/telemetry/"
 REQUEST_TIMEOUT_S = 60
-SOURCE_NAME = "satnogs_db"
 PAGE_DELAY_S = 0.75
 MAX_RETRIES = 5
 LogFunc = Callable[[str], None]
-
-# ------------------------------ Helpers -------------------------------
-
-def utc_now_iso() -> str:
-    """
-    Return the current UTC time in ISO-8601 format with trailing Z.
-    """
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 # ------------------------- SatNOGS API Client -------------------------
 
@@ -237,18 +227,13 @@ class DownloadService:
 
         for idx, packet in enumerate(packets, start=1):
             try:
-                # Only a small subset of metadata is indexed separately. 
-                # The full JSON packet is still stored untouched.
                 timestamp_utc, observer = extract_raw_fields_for_indexing(packet)
                 raw = RawPacket(
-                    norad_cat_id=norad_cat_id,
                     timestamp_utc=timestamp_utc,
                     observer=observer,
                     raw_json=packet,
                 )
-                _, inserted = self.db.insert_raw_packet(raw=raw, 
-                                                        inserted_utc=utc_now_iso(), 
-                                                        source=SOURCE_NAME)
+                _, inserted = self.db.insert_raw_packet(raw=raw)
                 if inserted:
                     result.raw_inserted += 1
                 else:
