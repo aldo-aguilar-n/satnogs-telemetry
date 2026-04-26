@@ -84,7 +84,7 @@ def utc_now_iso() -> str:
     """
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-# ------------------------ Config TOML Helpers -------------------------
+# -------------------------- Decoder Helpers ---------------------------
 
 def load_decoder_mapping(config_path: Path = CONFIG_PATH) -> dict[int, dict[str, str]]:
     """
@@ -218,18 +218,41 @@ def prompt_for_decoder_choice(norad_cat_id: int) -> tuple[str, str]:
     print(f"Using root class: {root_class}")
     return rel_path, root_class
 
+def _find_kaitai_compiler() -> str:
+    """
+    Resolve the Kaitai compiler from PATH.
+
+    On Windows, prefer the .bat/.cmd launcher if available.
+    """
+    for candidate in KSC_CANDIDATES:
+        found = shutil.which(candidate)
+        if found:
+            return found
+
+    raise FileNotFoundError(
+        "Could not find Kaitai Struct Compiler on PATH. "
+        "Make sure one of these works in this terminal: "
+        "kaitai-struct-compiler, kaitai-struct-compiler.bat"
+    )
+
+# ------------------- Engineering Conversion Helpers -------------------
+
 def conversion_lookup_path(norad_cat_id: int) -> Path:
-    """Return the per-NORAD conversion lookup path."""
+    """
+    Return the per-NORAD conversion lookup path.
+    """
     return DECODERS_DIR / str(norad_cat_id) / f"{norad_cat_id}{CONVERSION_SUFFIX}"
 
-
 def _normalize_lookup_field_name(name: str) -> str:
-    """Normalize field names so CSV ItemName and decoder JSON keys match."""
+    """
+    Normalize field names so CSV ItemName and decoder JSON keys match.
+    """
     return str(name or "").strip().upper()
 
-
 def _clean_units(units: str) -> str:
-    """Reduce verbose unit labels like 'Volts (V)' to 'V' when possible."""
+    """
+    Reduce verbose unit labels like 'Volts (V)' to 'V' when possible.
+    """
     text = str(units or "").replace(" ", " ").strip()
     if not text:
         return ""
@@ -238,9 +261,10 @@ def _clean_units(units: str) -> str:
         return match.group(1).strip()
     return " ".join(text.split())
 
-
 def _parse_linear_conversion(conv: str) -> dict[str, float] | None:
-    """Parse simple linear conversion strings like 'C0=... C1=...'."""
+    """
+    Parse simple linear conversion strings like 'C0=... C1=...'.
+    """
     text = str(conv or "").strip()
     if not text or "C1=" not in text:
         return None
@@ -260,9 +284,10 @@ def _parse_linear_conversion(conv: str) -> dict[str, float] | None:
         "c1": float(coeffs["C1"]),
     }
 
-
 def _parse_enum_conversion(conv: str) -> dict[str, str] | None:
-    """Parse enum strings like '0/IDLE 1/ACTIVE'."""
+    """
+    Parse enum strings like '0/IDLE 1/ACTIVE'.
+    """
     text = " ".join(str(conv or "").replace(" ", " ").split())
     if not text or "C1=" in text or "/" not in text:
         return None
@@ -276,9 +301,10 @@ def _parse_enum_conversion(conv: str) -> dict[str, str] | None:
         enum_map[str(int(raw))] = name.strip()
     return enum_map or None
 
-
 def build_conversion_lookup_from_csv(csv_path: str | Path) -> dict[str, dict[str, Any]]:
-    """Build a field-name -> conversion lookup table from a beacon CSV."""
+    """
+    Build a field-name -> conversion lookup table from a beacon CSV.
+    """
     lookup: dict[str, dict[str, Any]] = {}
     with Path(csv_path).open("r", newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -308,17 +334,19 @@ def build_conversion_lookup_from_csv(csv_path: str | Path) -> dict[str, dict[str
 
     return lookup
 
-
 def save_conversion_lookup(norad_cat_id: int, lookup: dict[str, dict[str, Any]]) -> Path:
-    """Persist the conversion lookup under decoders/<norad>/."""
+    """
+    Persist the conversion lookup under decoders/<norad>/.
+    """
     outpath = conversion_lookup_path(norad_cat_id)
     outpath.parent.mkdir(parents=True, exist_ok=True)
     outpath.write_text(json.dumps(lookup, indent=2, ensure_ascii=False), encoding="utf-8")
     return outpath
 
-
 def load_conversion_lookup(norad_cat_id: int) -> dict[str, dict[str, Any]]:
-    """Load a previously saved conversion lookup for one NORAD ID."""
+    """
+    Load a previously saved conversion lookup for one NORAD ID.
+    """
     path = conversion_lookup_path(norad_cat_id)
     if not path.exists():
         return {}
@@ -327,15 +355,17 @@ def load_conversion_lookup(norad_cat_id: int) -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
-
 def create_and_save_conversion_lookup(norad_cat_id: int, csv_path: str | Path) -> Path:
-    """Build and save the per-NORAD conversion lookup from CSV."""
+    """
+    Build and save the per-NORAD conversion lookup from CSV.
+    """
     lookup = build_conversion_lookup_from_csv(csv_path)
     return save_conversion_lookup(norad_cat_id=norad_cat_id, lookup=lookup)
 
-
 def _apply_conversion_entry(raw_value: Any, entry: dict[str, Any]) -> Any:
-    """Convert one raw leaf value using one lookup entry."""
+    """
+    Convert one raw leaf value using one lookup entry.
+    """
     kind = str(entry.get("kind", "")).strip().lower()
 
     if kind == "linear" and isinstance(raw_value, (int, float, bool)):
@@ -353,9 +383,10 @@ def _apply_conversion_entry(raw_value: Any, entry: dict[str, Any]) -> Any:
 
     return raw_value
 
-
 def apply_conversions_to_parsed_json(parsed_json: Any, lookup: dict[str, dict[str, Any]]) -> Any:
-    """Recursively apply field conversions to decoded JSON leaf values."""
+    """
+    Recursively apply field conversions to decoded JSON leaf values.
+    """
     if not lookup:
         return parsed_json
 
@@ -381,24 +412,6 @@ def apply_conversions_to_parsed_json(parsed_json: Any, lookup: dict[str, dict[st
         return node
 
     return _convert(parsed_json)
-
-
-def _find_kaitai_compiler() -> str:
-    """
-    Resolve the Kaitai compiler from PATH.
-
-    On Windows, prefer the .bat/.cmd launcher if available.
-    """
-    for candidate in KSC_CANDIDATES:
-        found = shutil.which(candidate)
-        if found:
-            return found
-
-    raise FileNotFoundError(
-        "Could not find Kaitai Struct Compiler on PATH. "
-        "Make sure one of these works in this terminal: "
-        "kaitai-struct-compiler, kaitai-struct-compiler.bat"
-    )
 
 # -------------------------- Decoder Manager ---------------------------
 
@@ -721,6 +734,7 @@ class DecoderLoader:
 
     def __init__(self) -> None:
         self._module_cache: dict[str, Any] = {}
+        self._kaitai_property_cache: dict[type, list[str]] = {}
 
     def parse_with_decoder(self, 
                            parser_path: str, 
@@ -758,10 +772,48 @@ class DecoderLoader:
         self._module_cache[parser_path] = module
         return module
 
+    def _get_kaitai_property_names(self, cls: type) -> list[str]:
+        """
+        Return public @property names for a Kaitai-generated class.
+
+        Kaitai `instances` are generated as Python @property methods, so they are
+        not visible in obj.__dict__ unless accessed. Cache per class to avoid
+        repeated dir(type(obj)) scans during bulk decoding.
+        """
+        cached = self._kaitai_property_cache.get(cls)
+        if cached is not None:
+            return cached
+
+        names: list[str] = []
+
+        for attr in dir(cls):
+            if attr.startswith("_"):
+                continue
+
+            prop = getattr(cls, attr, None)
+            if isinstance(prop, property):
+                names.append(attr)
+
+        self._kaitai_property_cache[cls] = names
+        return names
+
     def _to_builtin(self, value: Any, depth: int = 0) -> Any:
         """
         Convert parsed Kaitai objects into plain Python types suitable 
         for JSON.
+
+        For numeric Kaitai backing fields named *_raw that have a matching
+        computed @property without the suffix, emit the computed property in
+        the original field position instead of emitting the *_raw value.
+
+        Example
+        -------
+        bcn_temp_cdh_raw -> bcn_temp_cdh
+
+        This prevents CSV export from skipping the value due to the *_raw
+        suffix while keeping the field in the original packet order. The
+        numeric check avoids changing structural Kaitai objects such as
+        dest_callsign_raw and src_callsign_raw.
         """
         if depth > 25:
             return str(value)
@@ -783,14 +835,59 @@ class DecoderLoader:
 
         result: dict[str, Any] = {}
 
-        # Use __dict__ instead of dir() so field order follows the order
-        # in which Kaitai populated the instance attributes, rather than
-        # alphabetical order returned by dir().
-        for attr, attr_value in getattr(value, "__dict__", {}).items():
+        # Use __dict__ first so normal Kaitai fields keep the same order
+        # in which Kaitai populated the instance attributes.
+        for attr, attr_value in list(getattr(value, "__dict__", {}).items()):
             if attr.startswith("_"):
                 continue
+
             if callable(attr_value):
                 continue
+
+            # Numeric Kaitai backing fields like bcn_temp_cdh_raw may have
+            # a corresponding computed @property named bcn_temp_cdh.
+            #
+            # If so, do NOT emit the *_raw name. Emit the computed property
+            # under the non-raw name at this exact position.
+            #
+            # The numeric check avoids changing structural objects such as
+            # dest_callsign_raw, src_callsign_raw, etc.
+            if attr.endswith("_raw") and isinstance(attr_value, (int, float, bool)):
+                computed_attr = attr[:-4]
+                prop = getattr(type(value), computed_attr, None)
+
+                if isinstance(prop, property):
+                    try:
+                        computed_value = getattr(value, computed_attr)
+                    except Exception:
+                        continue
+
+                    if callable(computed_value):
+                        continue
+
+                    result[computed_attr] = self._to_builtin(computed_value, depth + 1)
+                    continue
+
+            result[attr] = self._to_builtin(attr_value, depth + 1)
+
+        # Kaitai `instances` are generated as @property methods.
+        # They are not present in __dict__ until accessed.
+        #
+        # This catches computed properties that do not have matching numeric
+        # *_raw backing fields. Properties already inserted above are skipped,
+        # so fields like bcn_temp_cdh are not appended again at the end.
+        for attr in self._get_kaitai_property_names(type(value)):
+            if attr in result:
+                continue
+
+            try:
+                attr_value = getattr(value, attr)
+            except Exception:
+                continue
+
+            if callable(attr_value):
+                continue
+
             result[attr] = self._to_builtin(attr_value, depth + 1)
 
         return result
