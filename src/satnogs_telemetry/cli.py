@@ -1,7 +1,7 @@
 """
 Title: cli.py
 Authors: Aldo Aguilar
-Date: 2026-04-12
+Date: 2026-05-03
 Description: Entry point for the SatNOGS telemetry downloader and parser
 application. This application allows the user to:
 - Download raw telemetry packets from the SatNOGS API for a specified
@@ -65,8 +65,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # Global argument
     parser.add_argument("--norad", type=int, 
                         help="NORAD catalog ID")
-    parser.add_argument("--conv_to_eng", action="store_true",
-                        help="Apply saved engineering conversions before storing parsed JSON")
     
     # Subparsers for specific commands
     subparsers = parser.add_subparsers(dest="command")
@@ -99,8 +97,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_parse.add_argument("--norad", required=True, type=int, 
                          help="NORAD catalog ID")
-    p_parse.add_argument("--conv_to_eng", action="store_true",
-                         help="Apply saved engineering conversions before storing parsed JSON")
+    p_parse.add_argument("--start", required=False,
+                         help="Optional UTC start time, e.g. 2026-04-11T00:00:00Z")
+    p_parse.add_argument("--end", required=False,
+                         help="Optional UTC end time, e.g. 2026-04-12T00:00:00Z")
 
     # Arguments for the 'reparse-all' command
     p_reparse_all = subparsers.add_parser(
@@ -109,8 +109,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_reparse_all.add_argument("--norad", required=True, type=int, 
                                help="NORAD catalog ID")
-    p_reparse_all.add_argument("--conv_to_eng", action="store_true",
-                               help="Apply saved engineering conversions before storing parsed JSON")
+
+    # Arguments for the 'reparse-range' command
+    p_reparse_range = subparsers.add_parser(
+        "reparse-range",
+        help="Delete and rebuild parsed rows within a specific timestamp range",
+    )
+    p_reparse_range.add_argument("--norad", required=True, type=int, 
+                                 help="NORAD catalog ID")
+    p_reparse_range.add_argument("--start", required=True,
+                                 help="UTC start time, e.g. 2026-04-11T00:00:00Z")
+    p_reparse_range.add_argument("--end", required=False,
+                                 help="UTC end time, e.g. 2026-04-12T00:00:00Z")
 
     # Arguments for the 'load-conversions' command
     p_load_conversions = subparsers.add_parser(
@@ -131,6 +141,20 @@ def _build_parser() -> argparse.ArgumentParser:
                               help="NORAD catalog ID")
     p_export_csv.add_argument("--outdir", default="csv", 
                               help="Output directory for APID CSV files")
+
+    # Arguments for the 'dump-parsed-json' command
+    p_dump_json = subparsers.add_parser(
+        "dump-parsed-json",
+        help="Dump compact parsed-frame archive JSON"
+    )
+    p_dump_json.add_argument("--norad", required=True, type=int,
+                             help="NORAD catalog ID")
+    p_dump_json.add_argument("--output", required=True,
+                             help="Output JSON file")
+    p_dump_json.add_argument("--start", required=False,
+                             help="Optional UTC start time, e.g. 2026-04-11T00:00:00Z")
+    p_dump_json.add_argument("--end", required=False,
+                             help="Optional UTC end time, e.g. 2026-04-12T00:00:00Z")
 
     # Arguments for the 'show-recent-raw' command
     p_show_raw = subparsers.add_parser(
@@ -248,8 +272,7 @@ def cmd_default_run(args: argparse.Namespace) -> int:
 
         # Parse unparsed raw rows
         parse_result = decoder.parse_unparsed(norad_cat_id=args.norad, 
-                                              log=_print,
-                                              conv_to_eng=args.conv_to_eng)
+                                              log=_print)
         _print("Parse result:")
         _print(json.dumps(parse_result, indent=2))
 
@@ -312,7 +335,8 @@ def cmd_parse_unparsed(args: argparse.Namespace) -> int:
         # Parse unparsed raw rows
         result = decoder.parse_unparsed(norad_cat_id=args.norad, 
                                         log=_print,
-                                        conv_to_eng=args.conv_to_eng)
+                                        start_utc=args.start,
+                                        end_utc=args.end)
         _print(json.dumps(result, indent=2))
         # Return exit code
         return 0 if not _result_errors(result) else 1
@@ -330,13 +354,40 @@ def cmd_reparse_all(args: argparse.Namespace) -> int:
         # downloading
         _ensure_decoder_selected(args.norad)
         # Delete existing parsed rows for this NORAD ID before reparsing
-        deleted = db.delete_parsed_rows_for_norad(args.norad)
+        deleted = db.delete_parsed_rows()
         _print(f"Deleted {deleted} existing parsed rows for NORAD "
                f"{args.norad}")
         # Reparse all raw rows
         result = decoder.parse_unparsed(norad_cat_id=args.norad, 
+                                        log=_print)
+        _print(json.dumps(result, indent=2))
+        # Return exit code
+        return 0 if not _result_errors(result) else 1
+    finally:
+        db.close()
+
+def cmd_reparse_range(args: argparse.Namespace) -> int:
+    """
+    Delete existing parsed rows in a timestamp range and rebuild them
+    from raw rows in the same range.
+    """
+    db, _, decoder = _open_services(args)
+    try:
+        # Ensure a decoder is selected for this NORAD ID before 
+        # reparsing.
+        _ensure_decoder_selected(args.norad)
+        # Delete existing parsed rows in this timestamp range.
+        deleted = db.delete_parsed_rows(start_utc=args.start,
+                                                  end_utc=args.end)
+        _print(
+            f"Deleted {deleted} parsed rows for NORAD {args.norad} "
+            f"from {args.start or '-inf'} to {args.end or '+inf'}"
+        )
+        # Reparse raw rows in this timestamp range.
+        result = decoder.parse_unparsed(norad_cat_id=args.norad,
                                         log=_print,
-                                        conv_to_eng=args.conv_to_eng)
+                                        start_utc=args.start,
+                                        end_utc=args.end)
         _print(json.dumps(result, indent=2))
         # Return exit code
         return 0 if not _result_errors(result) else 1
@@ -367,6 +418,27 @@ def cmd_export_csv(args: argparse.Namespace) -> int:
         _print(f"Wrote {len(written)} CSV files to {args.outdir}")
         for path in written:
             _print(path)
+        return 0
+    finally:
+        db.close()
+
+def cmd_dump_parsed_json(args: argparse.Namespace) -> int:
+    """
+    Dump compact parsed-frame archive JSON.
+
+    Each record contains only:
+    - timestamp_utc
+    - observer
+    - raw_ccsds_packet_hex
+    """
+    # Open services (DB)
+    db, _, _ = _open_services(args)
+    try:
+        # Dump compact archive JSON for this NORAD ID.
+        outpath = db.dump_parsed_archive_json(output_path=args.output,
+                                              start_utc=args.start,
+                                              end_utc=args.end)
+        _print(f"Wrote parsed archive JSON: {outpath}")
         return 0
     finally:
         db.close()
@@ -411,6 +483,7 @@ def cmd_show_recent_parsed(args: argparse.Namespace) -> int:
             print(f"ccsds_sequence_count : {row['ccsds_sequence_count']}")
             print(f"raw_ccsds_packet_hex : {row['raw_ccsds_packet_hex']}")
             print(f"parsed_json          : {row['parsed_json'] or ''}")
+            print(f"parsed_json_eng      : {row['parsed_json_eng'] or ''}")
         return 0
     finally:
         db.close()
@@ -469,10 +542,14 @@ def main() -> int:
         return cmd_parse_unparsed(args)
     if args.command == "reparse-all":
         return cmd_reparse_all(args)
+    if args.command == "reparse-range":
+        return cmd_reparse_range(args)
     if args.command == "load-conversions":
         return cmd_load_conversions(args)
     if args.command == "export-csv":
         return cmd_export_csv(args)
+    if args.command == "dump-parsed-json":
+        return cmd_dump_parsed_json(args)
     if args.command == "show-recent-raw":
         return cmd_show_recent_raw(args)
     if args.command == "show-recent-parsed":

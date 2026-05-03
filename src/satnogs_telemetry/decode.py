@@ -1,7 +1,7 @@
 """
 Title: decode.py
 Authors: Aldo Aguilar
-Date: 2026-04-12
+Date: 2026-05-03
 Description: Decode and parser utilities for SatNOGS telemetry.
 
 Functionalities
@@ -919,10 +919,14 @@ class DecoderService:
 
     def parse_unparsed(self, norad_cat_id: int, 
                        log=print,
-                       conv_to_eng: bool = False) -> dict[str, Any]:
+                       start_utc: str | None = None,
+                       end_utc: str | None = None) -> dict[str, Any]:
         """
-        Parse all raw rows for this NORAD that do not yet have parsed 
-        rows.
+        Parse raw rows for this NORAD that do not yet have parsed rows.
+
+        Optional start/end timestamps limit parsing to a timestamp range.
+        Engineering-unit JSON is generated automatically whenever a
+        conversion lookup table exists.
 
         Returns a dict summary.
         """
@@ -936,11 +940,15 @@ class DecoderService:
             "errors": [],
         }
 
-        rows = self.db.iter_unparsed_raw_rows()
+        rows = self.db.iter_unparsed_raw_rows(start_utc=start_utc,
+                                              end_utc=end_utc)
         result["total_seen"] = len(rows)
 
         if log:
-            log(f"Parsing {len(rows)} unparsed raw rows for NORAD {norad_cat_id}")
+            range_text = ""
+            if start_utc or end_utc:
+                range_text = f" from {start_utc or '-inf'} to {end_utc or '+inf'}"
+            log(f"Parsing {len(rows)} unparsed raw rows for NORAD {norad_cat_id}{range_text}")
 
         deleted_count = 0
 
@@ -951,13 +959,15 @@ class DecoderService:
                 parsed_dict = self.decode_raw_packet(
                     raw_frame_id=int(row["id"]),
                     norad_cat_id=norad_cat_id,
-                    raw_json=raw_json,
-                    conv_to_eng=conv_to_eng,
+                    raw_json=raw_json
                 )
 
                 parsed = SimpleNamespace(**parsed_dict)
-                self.db.insert_parsed_packet(parsed=parsed)
-                result["parsed_inserted"] += 1
+                inserted = self.db.insert_parsed_packet(parsed=parsed)
+                if inserted:
+                    result["parsed_inserted"] += 1
+                else:
+                    result["parsed_skipped_existing"] += 1
 
                 if log and idx % 100 == 0:
                     suffix = f" | deleted malformed={deleted_count}" if deleted_count else ""
@@ -980,11 +990,14 @@ class DecoderService:
     def decode_raw_packet(self,
                           raw_frame_id: int,
                           norad_cat_id: int,
-                          raw_json: dict[str, Any],
-                          conv_to_eng: bool = False
-                          ) -> dict[str, Any]:
+                          raw_json: dict[str, Any]) -> dict[str, Any]:
         """
         Decode one raw SatNOGS packet into parsed metadata + payload.
+
+        parsed_json always stores the raw decoded payload.
+        parsed_json_eng stores the engineering-unit version when a saved
+        conversion lookup table exists. Fields without conversions are
+        left as their raw values.
         """
         timestamp_utc, observer = extract_raw_fields_for_indexing(raw_json)
 
@@ -1001,9 +1014,10 @@ class DecoderService:
         sequence_count = ccsds["sequence_count"]
 
         parsed_json: dict[str, Any] | None = None
+        parsed_json_eng: dict[str, Any] | None = None
         parser_path = ""
         parser_root_class = ""
-        conversion_lookup = load_conversion_lookup(norad_cat_id) if conv_to_eng else {}
+        conversion_lookup = load_conversion_lookup(norad_cat_id)
 
         decoder_ref = self.decoder_manager.resolve_decoder(norad_cat_id)
         if decoder_ref is not None:
@@ -1032,22 +1046,32 @@ class DecoderService:
 
             for mode, candidate_hex in candidates:
                 try:
-                    parsed_json = self.decoder_loader.parse_with_decoder(
+                    decoded_payload = self.decoder_loader.parse_with_decoder(
                         parser_path=parser_path,
                         root_class=parser_root_class,
                         packet_hex=candidate_hex,
                     )
 
-                    if isinstance(parsed_json, dict):
-                        if conv_to_eng and conversion_lookup:
-                            parsed_json = apply_conversions_to_parsed_json(parsed_json, conversion_lookup)
-                            parsed_json["_conv_to_eng"] = True
+                    if isinstance(decoded_payload, dict):
+                        parsed_json = decoded_payload
                         parsed_json["_decode_mode"] = mode
+
+                        if conversion_lookup:
+                            parsed_json_eng = apply_conversions_to_parsed_json(
+                                parsed_json,
+                                conversion_lookup,
+                            )
                     else:
                         parsed_json = {
                             "_decode_mode": mode,
-                            "value": parsed_json,
+                            "value": decoded_payload,
                         }
+
+                        if conversion_lookup:
+                            parsed_json_eng = apply_conversions_to_parsed_json(
+                                parsed_json,
+                                conversion_lookup,
+                            )
                     break
 
                 except Exception as exc:
@@ -1061,6 +1085,7 @@ class DecoderService:
                     "_tried_modes": [mode for mode, _ in candidates],
                     "_errors": decode_errors,
                 }
+                parsed_json_eng = None
 
         return {
             "raw_frame_id": raw_frame_id,
@@ -1073,6 +1098,7 @@ class DecoderService:
             "ccsds_sequence_count": sequence_count,
             "raw_ccsds_packet_hex": ax25["raw_ccsds_packet_hex"],
             "parsed_json": parsed_json,
+            "parsed_json_eng": parsed_json_eng,
         }
 
     @staticmethod

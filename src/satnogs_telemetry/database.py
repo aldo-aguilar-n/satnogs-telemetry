@@ -1,7 +1,7 @@
 """
 Title: database.py
 Authors: Aldo Aguilar
-Date: 2026-04-12
+Date: 2026-05-03
 Description: SQLite database layer for SatNOGS telemetry.
 
 This module owns all direct interaction with SQLite. The rest of the 
@@ -68,6 +68,7 @@ class ParsedPacket:
     ccsds_sequence_count: int | None
     raw_ccsds_packet_hex: str
     parsed_json: dict[str, Any] | None
+    parsed_json_eng: dict[str, Any] | None = None
 
 @dataclass(slots=True)
 class SyncResult:
@@ -152,6 +153,7 @@ class TelemetryDB:
                 ccsds_sequence_count INTEGER,
                 raw_ccsds_packet_hex TEXT NOT NULL,
                 parsed_json TEXT,
+                parsed_json_eng TEXT,
                 FOREIGN KEY(raw_frame_id) REFERENCES raw_frames(id) ON DELETE CASCADE
             );
 
@@ -160,6 +162,14 @@ class TelemetryDB:
             CREATE INDEX IF NOT EXISTS idx_parsed_apid ON parsed_frames(ccsds_apid);
             """
         )
+        # Migration for existing databases created before parsed_json_eng.
+        cols = self.conn.execute("PRAGMA table_info(parsed_frames)").fetchall()
+        col_names = {str(col["name"]) for col in cols}
+        if "parsed_json_eng" not in col_names:
+            self.conn.execute(
+                "ALTER TABLE parsed_frames ADD COLUMN parsed_json_eng TEXT"
+            )
+
         self.conn.commit()
 
     def insert_raw_packet(self, raw: RawPacket) -> tuple[int | None, bool]:
@@ -215,14 +225,15 @@ class TelemetryDB:
         # 'None' when parsing succeeded but mission-specific decoding 
         # failed.
         parsed_json = json.dumps(parsed.parsed_json, ensure_ascii=False) if parsed.parsed_json is not None else None
+        parsed_json_eng = json.dumps(parsed.parsed_json_eng, ensure_ascii=False) if parsed.parsed_json_eng is not None else None
         self.conn.execute(
             """
             INSERT INTO parsed_frames (
                 raw_frame_id, timestamp_utc, observer,
                 dest_callsign, src_callsign, raw_ax25_frame_hex,
                 ccsds_apid, ccsds_sequence_count, raw_ccsds_packet_hex,
-                parsed_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                parsed_json, parsed_json_eng
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 parsed.raw_frame_id,
@@ -235,6 +246,7 @@ class TelemetryDB:
                 parsed.ccsds_sequence_count,
                 parsed.raw_ccsds_packet_hex,
                 parsed_json,
+                parsed_json_eng,
             ),
         )
         self.conn.commit()
@@ -249,23 +261,64 @@ class TelemetryDB:
         ).fetchone()
         return str(row[0]) if row else None
 
-    def iter_unparsed_raw_rows(self) -> list[sqlite3.Row]:
+    def iter_unparsed_raw_rows(
+        self,
+        start_utc: str | None = None,
+        end_utc: str | None = None,
+    ) -> list[sqlite3.Row]:
         """
-        Return all raw rows that do not yet have a matching parsed row.
+        Return raw rows that do not yet have a matching parsed row.
 
+        Optional start/end timestamps limit the raw rows that are parsed.
         Rows are ordered oldest-to-newest so parsing proceeds 
         chronologically.
         """
-        cur = self.conn.execute(
-            """
+        where = ["p.raw_frame_id IS NULL"]
+        params: list[Any] = []
+
+        if start_utc:
+            where.append("r.timestamp_utc >= ?")
+            params.append(start_utc)
+
+        if end_utc:
+            where.append("r.timestamp_utc <= ?")
+            params.append(end_utc)
+
+        sql = f"""
             SELECT r.*
             FROM raw_frames r
             LEFT JOIN parsed_frames p ON p.raw_frame_id = r.id
-            WHERE p.raw_frame_id IS NULL
+            WHERE {" AND ".join(where)}
             ORDER BY r.timestamp_utc ASC, r.id ASC
-            """
-        )
+        """
+        cur = self.conn.execute(sql, params)
         return list(cur.fetchall())
+
+    def iter_parsed_rows(
+        self,
+        start_utc: str | None = None,
+        end_utc: str | None = None,
+    ) -> list[sqlite3.Row]:
+        """
+        Return parsed rows, optionally limited to a timestamp range.
+        """
+        where: list[str] = []
+        params: list[Any] = []
+
+        if start_utc:
+            where.append("timestamp_utc >= ?")
+            params.append(start_utc)
+
+        if end_utc:
+            where.append("timestamp_utc <= ?")
+            params.append(end_utc)
+
+        sql = "SELECT * FROM parsed_frames"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY timestamp_utc ASC, raw_frame_id ASC"
+
+        return list(self.conn.execute(sql, params).fetchall())
 
     def get_recent_raw_rows(self, limit: int = 20) -> list[sqlite3.Row]:
         """
@@ -299,23 +352,74 @@ class TelemetryDB:
         self.conn.execute("DELETE FROM raw_frames WHERE id = ?", (raw_frame_id,))
         self.conn.commit()
 
-    def delete_parsed_rows_for_norad(self, norad_cat_id: int) -> int:
+    def delete_parsed_rows(self,
+                                     start_utc: str | None = None,
+                                     end_utc: str | None = None) -> int:
         """
-        Delete all parsed rows in this per-NORAD database.
+        Delete parsed rows in this per-NORAD database.
 
-        This supports a full reparse from raw data after decoder logic 
-        changes.
+        Optional start/end timestamps support reparsing only a subset of
+        stored raw frames after decoder logic changes.
 
         Returns
         -------
         int
             Number of parsed rows deleted.
         """
-        row = self.conn.execute("SELECT COUNT(*) FROM parsed_frames").fetchone()
+        where: list[str] = []
+        params: list[Any] = []
+
+        if start_utc:
+            where.append("timestamp_utc >= ?")
+            params.append(start_utc)
+
+        if end_utc:
+            where.append("timestamp_utc <= ?")
+            params.append(end_utc)
+
+        count_sql = "SELECT COUNT(*) FROM parsed_frames"
+        delete_sql = "DELETE FROM parsed_frames"
+
+        if where:
+            clause = " WHERE " + " AND ".join(where)
+            count_sql += clause
+            delete_sql += clause
+
+        row = self.conn.execute(count_sql, params).fetchone()
         count = int(row[0]) if row else 0
-        self.conn.execute("DELETE FROM parsed_frames")
+
+        self.conn.execute(delete_sql, params)
         self.conn.commit()
         return count
+
+    def dump_parsed_archive_json(self,
+                                 output_path: str | Path,
+                                 start_utc: str | None = None,
+                                 end_utc: str | None = None) -> Path:
+        """
+        Dump a compact parsed-frame archive JSON file.
+
+        Each record contains only timestamp_utc, observer, and
+        raw_ccsds_packet_hex to keep archival files small.
+        """
+        outpath = Path(output_path)
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+
+        rows = self.iter_parsed_rows(start_utc=start_utc, end_utc=end_utc)
+        records = [
+            {
+                "timestamp_utc": row["timestamp_utc"],
+                "observer": row["observer"],
+                "raw_ccsds_packet_hex": row["raw_ccsds_packet_hex"],
+            }
+            for row in rows
+        ]
+
+        outpath.write_text(
+            json.dumps(records, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        return outpath
 
     def get_available_numeric_fields(self, apid: int | None = None) -> list[str]:
         """

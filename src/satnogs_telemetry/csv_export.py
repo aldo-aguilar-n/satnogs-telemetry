@@ -1,20 +1,16 @@
 """
 Title: csv_export.py
 Authors: Aldo Aguilar
-Date: 2026-04-12
+Date: 2026-05-03
 Description: CSV export helpers for parsed telemetry.
 
-This module exports one CSV per APID directly from the parsed SQLite
-rows. The CSV columns are flattened from the decoded JSON and ordered as
-follows:
-- Timestamp (UTC observation time as original SatNOGS string)
-- Observer (SatNOGS ground station identifier)
-- CCSDS primary header fields
-- CCSDS secondary header fields
-- User data fields
+This module exports two CSVs per APID when conversion lookup tables are
+available:
+- apid_XXX_raw.csv from parsed_json
+- apid_XXX_eng.csv from parsed_json_eng or converted parsed_json fallback
 
-Only decoded payloads that actually contain a usable
-'ccsds_space_packet' are included.
+If no conversion lookup table exists for the NORAD ID, only raw CSVs are
+written because engineering CSVs would be exact copies.
 """
 
 from __future__ import annotations
@@ -24,6 +20,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .decode import (
+    apply_conversions_to_parsed_json,
+    load_conversion_lookup,
+)
 
 # ------------------------------ Helpers -------------------------------
 
@@ -59,7 +59,6 @@ def flatten_dict(
     items[parent_key] = obj
     return items
 
-
 def flatten_keys_in_order(
     obj: Any,
     parent_key: str = "",
@@ -90,14 +89,12 @@ def flatten_keys_in_order(
     keys.append(parent_key)
     return keys
 
-
 def _skip_payload_raw_leaf(path: str, value: Any) -> bool:
     """
     Skip payload raw engineering duplicates such as '*_raw'.
     """
     leaf = str(path).split(".")[-1].lower()
     return leaf.endswith("_raw")
-
 
 def _find_first_key_recursive(obj: Any, target_key: str) -> Any | None:
     """
@@ -120,7 +117,6 @@ def _find_first_key_recursive(obj: Any, target_key: str) -> Any | None:
 
     return None
 
-
 def get_ccsds_space_packet(parsed: dict[str, Any]) -> dict[str, Any] | None:
     """
     Retrieve the decoded CCSDS space packet from a parsed payload.
@@ -128,11 +124,9 @@ def get_ccsds_space_packet(parsed: dict[str, Any]) -> dict[str, Any] | None:
     found = _find_first_key_recursive(parsed, "ccsds_space_packet")
     return found if isinstance(found, dict) else None
 
-
 def get_primary_header_obj(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
     primary_header = ccsds_packet.get("packet_primary_header", {})
     return primary_header if isinstance(primary_header, dict) else {}
-
 
 def get_secondary_header_obj(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
     try:
@@ -140,7 +134,6 @@ def get_secondary_header_obj(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         secondary_header = {}
     return secondary_header if isinstance(secondary_header, dict) else {}
-
 
 def get_user_data_obj(ccsds_packet: dict[str, Any]) -> Any:
     try:
@@ -155,30 +148,23 @@ def get_user_data_obj(ccsds_packet: dict[str, Any]) -> Any:
 
     return user_data
 
-
 def flatten_primary_header(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
     return flatten_dict(get_primary_header_obj(ccsds_packet))
-
 
 def flatten_secondary_header(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
     return flatten_dict(get_secondary_header_obj(ccsds_packet))
 
-
 def flatten_user_data(ccsds_packet: dict[str, Any]) -> dict[str, Any]:
     return flatten_dict(get_user_data_obj(ccsds_packet), skip_leaf=_skip_payload_raw_leaf)
-
 
 def primary_header_keys_in_order(ccsds_packet: dict[str, Any]) -> list[str]:
     return flatten_keys_in_order(get_primary_header_obj(ccsds_packet))
 
-
 def secondary_header_keys_in_order(ccsds_packet: dict[str, Any]) -> list[str]:
     return flatten_keys_in_order(get_secondary_header_obj(ccsds_packet))
 
-
 def user_data_keys_in_order(ccsds_packet: dict[str, Any]) -> list[str]:
     return flatten_keys_in_order(get_user_data_obj(ccsds_packet), skip_leaf=_skip_payload_raw_leaf)
-
 
 def choose_timestamp_from_observation_time(row_timestamp_utc: Any) -> str:
     """
@@ -187,27 +173,31 @@ def choose_timestamp_from_observation_time(row_timestamp_utc: Any) -> str:
     """
     return str(row_timestamp_utc or "").strip()
 
-
-def build_row_from_db_row(row: Any) -> tuple[dict[str, Any], list[str]] | None:
-    """
-    Build one flattened CSV row from one parsed SQLite row together with
-    the exact column order implied by the decoded JSON structure.
-
-    Rows that only contain decode-error/debug metadata are skipped.
-    """
-    parsed_json = row["parsed_json"]
-    if not parsed_json:
+def _load_json_payload(text: Any) -> dict[str, Any] | None:
+    if not text:
         return None
 
     try:
-        parsed = json.loads(parsed_json)
+        payload = json.loads(text)
     except Exception:
         return None
 
+    return payload if isinstance(payload, dict) else None
+
+def _is_usable_payload(parsed: dict[str, Any] | None) -> bool:
     if not isinstance(parsed, dict):
-        return None
+        return False
 
     if parsed.get("_decode_error") is True:
+        return False
+
+    return get_ccsds_space_packet(parsed) is not None
+
+def build_row_from_payload(
+    row: Any,
+    parsed: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]] | None:
+    if not _is_usable_payload(parsed):
         return None
 
     ccsds_packet = get_ccsds_space_packet(parsed)
@@ -234,12 +224,38 @@ def build_row_from_db_row(row: Any) -> tuple[dict[str, Any], list[str]] | None:
 
     return out, ordered_columns
 
+def build_raw_row_from_db_row(row: Any) -> tuple[dict[str, Any], list[str]] | None:
+    parsed = _load_json_payload(row["parsed_json"])
+    if parsed is None:
+        return None
 
-def order_columns(rows: list[dict[str, Any]], ordered_column_lists: list[list[str]]) -> list[str]:
-    """
-    Order CSV columns strictly by first-seen decoder/JSON order across
-    rows. No alphabetical sorting is performed.
-    """
+    return build_row_from_payload(row, parsed)
+
+def build_eng_row_from_db_row(
+    row: Any,
+    conversion_lookup: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], list[str]] | None:
+    parsed_eng = None
+
+    if "parsed_json_eng" in row.keys():
+        parsed_eng = _load_json_payload(row["parsed_json_eng"])
+
+    if parsed_eng is None:
+        parsed_raw = _load_json_payload(row["parsed_json"])
+        if parsed_raw is None:
+            return None
+
+        parsed_eng = apply_conversions_to_parsed_json(
+            parsed_raw,
+            conversion_lookup,
+        )
+
+    return build_row_from_payload(row, parsed_eng)
+
+def order_columns(
+    rows: list[dict[str, Any]],
+    ordered_column_lists: list[list[str]],
+) -> list[str]:
     final_columns: list[str] = []
     seen: set[str] = set()
 
@@ -262,34 +278,17 @@ def order_columns(rows: list[dict[str, Any]], ordered_column_lists: list[list[st
 
     return final_columns
 
-
-def export_apid_csvs(db, norad_cat_id: int, outdir: str) -> list[str]:
-    """
-    Export one CSV per APID for a satellite.
-    """
-    rows = list(reversed(db.get_recent_parsed_rows(limit=1_000_000)))
-
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    grouped_order_lists: dict[str, list[list[str]]] = {}
-
-    for row in rows:
-        built = build_row_from_db_row(row)
-        if built is None:
-            continue
-
-        csv_row, ordered_columns = built
-        apid = row["ccsds_apid"]
-        apid_key = f"{int(apid):03d}" if apid is not None else "unknown"
-        grouped.setdefault(apid_key, []).append(csv_row)
-        grouped_order_lists.setdefault(apid_key, []).append(ordered_columns)
-
-    output_dir = Path(outdir) / str(norad_cat_id)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+def _write_grouped_csvs(
+    grouped: dict[str, list[dict[str, Any]]],
+    grouped_order_lists: dict[str, list[list[str]]],
+    output_dir: Path,
+    suffix: str,
+) -> list[str]:
     written_files: list[str] = []
+
     for apid_key, apid_rows in sorted(grouped.items(), key=lambda kv: kv[0]):
         columns = order_columns(apid_rows, grouped_order_lists.get(apid_key, []))
-        outpath = output_dir / f"apid_{apid_key}.csv"
+        outpath = output_dir / f"apid_{apid_key}_{suffix}.csv"
 
         with outpath.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
@@ -301,5 +300,71 @@ def export_apid_csvs(db, norad_cat_id: int, outdir: str) -> list[str]:
 
     return written_files
 
+def _add_row_to_group(
+    row: Any,
+    built: tuple[dict[str, Any], list[str]] | None,
+    grouped: dict[str, list[dict[str, Any]]],
+    grouped_order_lists: dict[str, list[list[str]]],
+) -> None:
+    if built is None:
+        return
+
+    csv_row, ordered_columns = built
+    apid = row["ccsds_apid"]
+    apid_key = f"{int(apid):03d}" if apid is not None else "unknown"
+
+    grouped.setdefault(apid_key, []).append(csv_row)
+    grouped_order_lists.setdefault(apid_key, []).append(ordered_columns)
+
+def export_apid_csvs(db, norad_cat_id: int, outdir: str) -> list[str]:
+    rows = db.iter_parsed_rows()
+    conversion_lookup = load_conversion_lookup(norad_cat_id)
+
+    raw_grouped: dict[str, list[dict[str, Any]]] = {}
+    raw_order_lists: dict[str, list[list[str]]] = {}
+
+    eng_grouped: dict[str, list[dict[str, Any]]] = {}
+    eng_order_lists: dict[str, list[list[str]]] = {}
+
+    for row in rows:
+        _add_row_to_group(
+            row,
+            build_raw_row_from_db_row(row),
+            raw_grouped,
+            raw_order_lists,
+        )
+
+        if conversion_lookup:
+            _add_row_to_group(
+                row,
+                build_eng_row_from_db_row(row, conversion_lookup),
+                eng_grouped,
+                eng_order_lists,
+            )
+
+    output_dir = Path(outdir) / str(norad_cat_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    written_files: list[str] = []
+    written_files.extend(
+        _write_grouped_csvs(
+            raw_grouped,
+            raw_order_lists,
+            output_dir,
+            suffix="raw",
+        )
+    )
+
+    if conversion_lookup:
+        written_files.extend(
+            _write_grouped_csvs(
+                eng_grouped,
+                eng_order_lists,
+                output_dir,
+                suffix="eng",
+            )
+        )
+
+    return written_files
 
 # ----------------------------------------------------------------------
