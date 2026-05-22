@@ -34,7 +34,7 @@ You need:
 
 - Python 3.11 to 3.13
 - Poetry `pip install poetry`
-- Java SDK 26.0.1 https://www.oracle.com/java/technologies/downloads/
+- Java SDK 26.0.1 https://www.oracle.com/java/technologies/downloads/ (make sure to add location of Java SDK bin to PATH)
 - a SatNOGS API token if the API requires authentication for your usage
 - An SSH key for GitHub to make cloning easier
 
