@@ -541,7 +541,7 @@ class DecoderManager:
 
         try:
             print(f"Compiling {rel_ksy} into {rel_out}...", flush=True)
-
+            print(f"Running command: {printable_cmd} (from {project_root})", flush=True)
             completed = subprocess.run(
                 cmd,
                 check=True,
@@ -549,6 +549,7 @@ class DecoderManager:
                 text=True,
                 cwd=str(project_root),
             )
+            print(f"Kaitai compilation completed with exit code {completed.returncode}", flush=True)
 
             if completed.stdout.strip():
                 print(completed.stdout, flush=True)

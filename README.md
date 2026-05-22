@@ -33,8 +33,8 @@ The project also expects decoder `.ksy` files to exist under the repo, typically
 You need:
 
 - Python 3.11 to 3.13
-- Poetry
-- Kaitai Struct Compiler available on your system `PATH`
+- Poetry `pip install poetry`
+- Java SDK 26.0.1 https://www.oracle.com/java/technologies/downloads/
 - a SatNOGS API token if the API requires authentication for your usage
 - An SSH key for GitHub to make cloning easier
 
