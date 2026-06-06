@@ -2,7 +2,8 @@
 name = "satnogs-telemetry"
 version = "0.2.0"
 description = "Headless SatNOGS telemetry downloader, decoder, SQLite store, plotter, and CSV exporter"
-authors = ["OpenAI <support@openai.com>"]
+authors = ["Aldo Aguilar <aldo.aguilar@berkeley.edu>"]
+license = "MIT"
 readme = "README.md"
 packages = [{ include = "satnogs_telemetry", from = "src" }]
 

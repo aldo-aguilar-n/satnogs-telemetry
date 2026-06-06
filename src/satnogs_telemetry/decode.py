@@ -92,7 +92,7 @@ def load_decoder_mapping(config_path: Path = CONFIG_PATH) -> dict[int, dict[str,
 
     Expected format
     ---------------
-    [satellites.98386.decoder]
+    [satellites.68460.decoder]
     ksy_path = "tools/satnogs-decoders/ksy/cosmo.ksy"
     root_class = "Cosmo"
     """
