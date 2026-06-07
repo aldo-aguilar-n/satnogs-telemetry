@@ -1,6 +1,6 @@
 # satnogs-telemetry
 
-Command-line tool to download telemetry from the SatNOGS database, store the raw frames locally, decode them with Kaitai-based decoders, inspect parsed packets, export CSV files, and plot decoded fields.
+Command-line tool for downloading telemetry from the SatNOGS database, storing raw frames in a local SQLite3 database, decoding them with Kaitai-based decoders, converting decoded values to engineering units, exporting the results to CSV files, and generating plots from the data.
 
 ## What the project does
 
