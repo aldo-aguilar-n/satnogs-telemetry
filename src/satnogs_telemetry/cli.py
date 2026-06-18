@@ -1,12 +1,13 @@
 """
 Title: cli.py
 Authors: Aldo Aguilar
-Date: 2026-05-03
+Date: 2026-06-17
 Description: Entry point for the SatNOGS telemetry downloader and parser
 application. This application allows the user to:
 - Download raw telemetry packets from the SatNOGS API for a specified
   NORAD ID
-- Parse the raw packets into structured data using satnogs-decoders
+- Parse the raw packets into structured data using a decoder generated
+  from a selected telemetry dictionary
 - Store raw and parsed telemetry in a local SQLite database
 - Export parsed data to CSV files
 - Plot decoded numeric fields to PNG files
@@ -28,7 +29,6 @@ from .database import TelemetryDB
 from .decode import (
     DecoderManager,
     DecoderService,
-    create_and_save_conversion_lookup,
     load_decoder_mapping,
 )
 from .download import DownloadService
@@ -121,16 +121,6 @@ def _build_parser() -> argparse.ArgumentParser:
                                  help="UTC start time, e.g. 2026-04-11T00:00:00Z")
     p_reparse_range.add_argument("--end", required=False,
                                  help="UTC end time, e.g. 2026-04-12T00:00:00Z")
-
-    # Arguments for the 'load-conversions' command
-    p_load_conversions = subparsers.add_parser(
-        "load-conversions",
-        help="Load a beacon definition CSV and save a conversion lookup table"
-    )
-    p_load_conversions.add_argument("--norad", required=True, type=int,
-                                    help="NORAD catalog ID")
-    p_load_conversions.add_argument("--input", required=True,
-                                    help="Input beacon definition CSV")
 
     # Arguments for the 'export-csv' command
     p_export_csv = subparsers.add_parser(
@@ -394,17 +384,6 @@ def cmd_reparse_range(args: argparse.Namespace) -> int:
     finally:
         db.close()
 
-def cmd_load_conversions(args: argparse.Namespace) -> int:
-    """
-    Load a beacon definition CSV and save the per-NORAD conversion lookup.
-    """
-    outpath = create_and_save_conversion_lookup(
-        norad_cat_id=args.norad,
-        csv_path=args.input,
-    )
-    _print(f"Saved conversion lookup: {outpath}")
-    return 0
-
 def cmd_export_csv(args: argparse.Namespace) -> int:
     """
     Export one CSV per APID for the requested NORAD ID.
@@ -544,8 +523,6 @@ def main() -> int:
         return cmd_reparse_all(args)
     if args.command == "reparse-range":
         return cmd_reparse_range(args)
-    if args.command == "load-conversions":
-        return cmd_load_conversions(args)
     if args.command == "export-csv":
         return cmd_export_csv(args)
     if args.command == "dump-parsed-json":

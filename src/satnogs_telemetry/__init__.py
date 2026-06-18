@@ -6,8 +6,8 @@ The package is intentionally organized into a few broad modules:
 
 - 'cli': command-line entry points and user-facing commands
 - 'download': SatNOGS API access and raw packet synchronization
-- 'decode': AX.25/CCSDS parsing, decoder selection, Kaitai compilation,
-            and payload decoding
+- 'decode': decoder selection/generation, and payload AX.25/CCSDS
+            decoding and parsing
 - 'database': SQLite schema and CRUD helpers
 - 'plotting': simple time-series plotting from parsed rows
 - 'csv_export': one-CSV-per-APID export helpers

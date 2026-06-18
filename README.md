@@ -1,17 +1,15 @@
 # satnogs-telemetry
 
-Command-line tool for downloading telemetry from the SatNOGS database, storing raw frames in a local SQLite3 database, decoding them with Kaitai-based decoders, converting decoded values to engineering units, exporting the results to CSV files, and generating plots from the data.
+Command-line tool for downloading telemetry from the SatNOGS database, storing raw frames in a local SQLite3 database, parsing them with decoders generated from telemetry dictionaries, exporting the results to CSV files, and generating plots from the data.
 
 ## What the project does
 
 For a given satellite NORAD ID, this project can:
 
 - download telemetry frames from the SatNOGS DB API
-- store the original SatNOGS packet JSON in a local SQLite database
-- parse AX.25 and CCSDS headers from each frame
-- decode mission-specific payloads using a Kaitai `.ksy` schema
-- cache the generated Python decoder locally so recompilation is only done when needed
-- optionally convert raw decoded values to engineering units using a CSV-based conversion table
+- store the raw SatNOGS packets in a local SQLite database
+- generate and cache a Python decoder under `decoders/<norad>/decoder.py` based on a user-selected telemetry dictionary
+- decode and parse AX.25 frames into mission-specific CCSDS packets following the telemetry dictionary
 - export parsed packets to CSV
 - plot decoded numeric fields to PNG
 
@@ -19,14 +17,11 @@ For a given satellite NORAD ID, this project can:
 
 These folders are created in the project root when needed:
 
-- `data/` - one SQLite database per satellite, for example `data/98386.sqlite3`
-- `decoders/` - compiled decoder cache and optional conversion lookup files, for example `decoders/98386/`
+- `data/` - one SQLite database per satellite, for example `data/68635.sqlite3`
+- `ctdb/` - telemetry dictionaries available for selection. Copy any telemetry dictionaries you want to use into this folder for convenience.
+- `decoders/` - generated decoder cache, for example `decoders/68635/decoder.py`
 - `csv/` - CSV exports when you use `export-csv`
 - any plot output folder you choose when using `plot`
-
-The project also expects decoder `.ksy` files to exist under the repo, typically in:
-
-- `tools/satnogs-decoders/ksy/`
 
 ## Requirements
 
@@ -34,7 +29,6 @@ You need:
 
 - Python 3.11 to 3.13
 - Poetry `pip install poetry`
-- Java SDK 26.0.1 https://www.oracle.com/java/technologies/downloads/ (make sure to add location of Java SDK bin to PATH)
 - a SatNOGS API token if the API requires authentication for your usage
 - An SSH key for GitHub to make cloning easier
 
@@ -53,26 +47,7 @@ cd satnogs-telemetry
 poetry install
 ```
 
-### 3. Install Kaitai Struct Compiler
-
-This project uses the Python Kaitai runtime through Poetry, but it also needs the external compiler executable to generate decoders from `.ksy` files. The compiler is available at: https://kaitai.io/
-
-After installing it. Verify that the compiler is available in your terminal:
-
-```bash
-kaitai-struct-compiler --version
-```
-
-On Windows, you can also check:
-
-```bat
-where kaitai-struct-compiler
-where kaitai-struct-compiler.bat
-```
-
-If this command is not found, install Kaitai Struct Compiler and make sure it is on your `PATH`.
-
-### 4. Create a `.env` file with your SatNOGS token
+### 3. Create a `.env` file with your SatNOGS token
 
 Create a file named `.env` in the project root with the following contents:
 
@@ -88,7 +63,6 @@ Before your first real run, confirm these work:
 
 ```bash
 poetry run satnogs-telemetry --help
-kaitai-struct-compiler --version
 ```
 
 And confirm these files exist:
@@ -113,7 +87,8 @@ What this does:
 
 - opens or creates `data/<norad_id>.sqlite3`
 - downloads only new raw frames not already stored
-- compiles the configured decoder if needed
+- prompts for a decoder database if one is not configured
+- generates `decoders/<norad>/decoder.py` if needed
 - parses raw frames that do not yet have parsed rows
 - stores parsed output in the database
 
@@ -128,12 +103,6 @@ poetry run satnogs-telemetry --norad 98386
 ```
 
 Use this for day-to-day operation.
-
-If you also want engineering conversions applied during parsing:
-
-```bash
-poetry run satnogs-telemetry --norad 98386 --conv_to_eng
-```
 
 ### Download only new raw frames
 
@@ -160,56 +129,26 @@ This is useful for backfilling or re-downloading a known period. Some SatNOGS us
 poetry run satnogs-telemetry parse-unparsed --norad 98386
 ```
 
-With engineering conversion enabled:
-
-```bash
-poetry run satnogs-telemetry parse-unparsed --norad 98386 --conv_to_eng
-```
-
 ### Rebuild all parsed rows from the stored raw data
 
 ```bash
 poetry run satnogs-telemetry reparse-all --norad 98386
 ```
 
-Use this after changing:
+Use this after changing parser logic or the telemetry dictionary.
 
-- parser logic
-- the `.ksy` decoder
-- engineering conversion definitions
-
-With engineering conversion enabled:
+### Reparse rows within range
 
 ```bash
-poetry run satnogs-telemetry reparse-all --norad 98386 --conv_to_eng
+poetry run satnogs-telemetry reparse-range \
+  --norad 98386 \
+  --start 2026-04-11T00:00:00Z \
+  --end 2026-04-12T00:00:00Z
 ```
 
-### Load engineering conversions from a CSV definition
+### Engineering conversions
 
-```bash
-poetry run satnogs-telemetry load-conversions --norad 98386 --input beacon_definition.csv
-```
-
-This builds a lookup table from a CSV and saves it under:
-
-```text
-decoders/98386/98386_conversions.json
-```
-
-Then you can parse with `--conv_to_eng` to store converted values instead of raw decoded values where matching conversion rules exist.
-
-#### Expected CSV fields
-
-The conversion loader looks for columns such as:
-
-- `ItemName`
-- `Units`
-- `Conversion`
-
-Supported conversion styles include:
-
-- simple linear expressions like `C0=... C1=...`
-- enum mappings like `0/OFF 1/ON`
+Engineering conversions are read from the telemetry dictionary and written to `parsed_json_eng` when conversion definitions exist.
 
 ### Show recent raw rows
 
@@ -237,6 +176,16 @@ To restrict the list to a single APID:
 
 ```bash
 poetry run satnogs-telemetry list-fields --norad 98386 --apid 201
+```
+
+### Dump parsed frames into compact JSON file
+
+```bash
+poetry run satnogs-telemetry dump-parsed-json \
+  --norad 98386 \
+  --output data_dump.json \
+  --start 2026-04-11T00:00:00Z \
+  --end 2026-04-12T00:00:00Z
 ```
 
 ### Plot one decoded field
@@ -278,11 +227,11 @@ csv/98386/
 For example:
 
 ```text
-csv/98386/apid_201.csv
-csv/98386/apid_202.csv
+csv/98386/apid_201_raw.csv
+csv/98386/apid_201_eng.csv
+csv/98386/apid_202_raw.csv
+csv/98386/apid_202_eng.csv
 ```
-
-Note: This CSV exporter currently organizes columns alphabetically rather than following the parameter order defined in the frame decoder. This will be fixed in future iterations.
 
 ## How parsed data is organized
 
@@ -307,43 +256,16 @@ The `parsed_frames` table contains:
 
 This split allows you to reparse packets later without downloading them again.
 
-## Decoder compilation and caching
+## Decoder generation and caching
 
-The first time a satellite is parsed, the tool compiles the configured `.ksy` file into Python and stores the generated decoder under:
-
-```text
-decoders/<norad>/
-```
-
-Example:
+The first time a satellite is parsed, the tool generates a Python decoder from the configured spreadsheet database and stores it under:
 
 ```text
-decoders/98386/cosmo.py
-decoders/98386/.buildinfo.json
+decoders/<norad>/decoder.py
+decoders/<norad>/.buildinfo.json
 ```
 
-The compiled decoder is reused until the `.ksy` file changes.
-
-## Engineering conversion workflow
-
-If your decoder returns raw values and you want engineering values:
-
-1. prepare a CSV definition file
-2. load it with `load-conversions`
-3. parse using `--conv_to_eng`
-
-Example:
-
-```bash
-poetry run satnogs-telemetry load-conversions --norad 98386 --input beacon.csv
-poetry run satnogs-telemetry reparse-all --norad 98386 --conv_to_eng
-```
-
-Important:
-
-- loading conversions alone does not change existing parsed rows
-- you must parse or reparse with `--conv_to_eng` for conversions to be applied
-- conversions are applied by matching CSV `ItemName` entries to decoded JSON leaf field names
+The generated decoder is reused until the source spreadsheet changes. `parsed_json` keeps the same decoded-payload structure as before, and `parsed_json_eng` is populated when the spreadsheet defines engineering conversions.
 
 ## Common examples
 
@@ -366,29 +288,18 @@ poetry run satnogs-telemetry parse-unparsed --norad 98386
 poetry run satnogs-telemetry show-recent-parsed --norad 98386 --limit 10
 ```
 
-### Example 3: Load conversions and regenerate parsed products
+### Example 3: Regenerate parsed products after decoder database changes
 
 ```bash
-poetry run satnogs-telemetry load-conversions --norad 98386 --input beacon_definition.csv
-poetry run satnogs-telemetry reparse-all --norad 98386 --conv_to_eng
+poetry run satnogs-telemetry reparse-all --norad 98386
 poetry run satnogs-telemetry export-csv --norad 98386 --outdir csv
 ```
 
 ## Troubleshooting
 
-### `kaitai-struct-compiler` not found
+### Decoder source file not found
 
-The external Kaitai compiler is not installed or not on your `PATH`.
-
-Check:
-
-```bash
-kaitai-struct-compiler --version
-```
-
-### `KSY file not found`
-
-The `ksy_path` in `config.toml` is wrong, or the file does not exist in the repo.
+The `source_path` in `config.toml` is wrong, or the spreadsheet database file does not exist in the repo.
 
 ### The tool asks me to choose a decoder interactively
 
@@ -403,19 +314,10 @@ You can either:
 
 Possible causes:
 
-- wrong `.ksy` selected for that satellite
-- incorrect `root_class` in `config.toml`
+- wrong telemetry dictionary selected for that satellite
+- incorrect `source_path` in `config.toml`
 - malformed frames in the downloaded data
 - mission payload structure changed relative to the schema
-
-### `--conv_to_eng` does not seem to do anything
-
-Check that:
-
-- you already ran `load-conversions`
-- the conversion JSON exists under `decoders/<norad>/`
-- the CSV `ItemName` values match the decoded field names
-- you reparsed after loading conversions
 
 ## Notes for maintainers
 

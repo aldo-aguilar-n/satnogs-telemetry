@@ -1,16 +1,15 @@
 """
 Title: csv_export.py
 Authors: Aldo Aguilar
-Date: 2026-05-03
+Date: 2026-06-17
 Description: CSV export helpers for parsed telemetry.
 
-This module exports two CSVs per APID when conversion lookup tables are
-available:
-- apid_XXX_raw.csv from parsed_json
-- apid_XXX_eng.csv from parsed_json_eng or converted parsed_json fallback
+This module transforms decoded/parsed JSON data stored in SQLite into
+CSV files.
 
-If no conversion lookup table exists for the NORAD ID, only raw CSVs are
-written because engineering CSVs would be exact copies.
+Outputs:
+- apid_XXX_raw.csv from parsed_json
+- apid_XXX_eng.csv from parsed_json_eng, when present
 """
 
 from __future__ import annotations
@@ -19,11 +18,6 @@ import csv
 import json
 from pathlib import Path
 from typing import Any
-
-from .decode import (
-    apply_conversions_to_parsed_json,
-    load_conversion_lookup,
-)
 
 # ------------------------------ Helpers -------------------------------
 
@@ -231,24 +225,13 @@ def build_raw_row_from_db_row(row: Any) -> tuple[dict[str, Any], list[str]] | No
 
     return build_row_from_payload(row, parsed)
 
-def build_eng_row_from_db_row(
-    row: Any,
-    conversion_lookup: dict[str, dict[str, Any]],
-) -> tuple[dict[str, Any], list[str]] | None:
-    parsed_eng = None
+def build_eng_row_from_db_row(row: Any) -> tuple[dict[str, Any], list[str]] | None:
+    if "parsed_json_eng" not in row.keys():
+        return None
 
-    if "parsed_json_eng" in row.keys():
-        parsed_eng = _load_json_payload(row["parsed_json_eng"])
-
+    parsed_eng = _load_json_payload(row["parsed_json_eng"])
     if parsed_eng is None:
-        parsed_raw = _load_json_payload(row["parsed_json"])
-        if parsed_raw is None:
-            return None
-
-        parsed_eng = apply_conversions_to_parsed_json(
-            parsed_raw,
-            conversion_lookup,
-        )
+        return None
 
     return build_row_from_payload(row, parsed_eng)
 
@@ -318,7 +301,6 @@ def _add_row_to_group(
 
 def export_apid_csvs(db, norad_cat_id: int, outdir: str) -> list[str]:
     rows = db.iter_parsed_rows()
-    conversion_lookup = load_conversion_lookup(norad_cat_id)
 
     raw_grouped: dict[str, list[dict[str, Any]]] = {}
     raw_order_lists: dict[str, list[list[str]]] = {}
@@ -334,13 +316,12 @@ def export_apid_csvs(db, norad_cat_id: int, outdir: str) -> list[str]:
             raw_order_lists,
         )
 
-        if conversion_lookup:
-            _add_row_to_group(
-                row,
-                build_eng_row_from_db_row(row, conversion_lookup),
-                eng_grouped,
-                eng_order_lists,
-            )
+        _add_row_to_group(
+            row,
+            build_eng_row_from_db_row(row),
+            eng_grouped,
+            eng_order_lists,
+        )
 
     output_dir = Path(outdir) / str(norad_cat_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -355,7 +336,7 @@ def export_apid_csvs(db, norad_cat_id: int, outdir: str) -> list[str]:
         )
     )
 
-    if conversion_lookup:
+    if eng_grouped:
         written_files.extend(
             _write_grouped_csvs(
                 eng_grouped,

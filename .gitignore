@@ -6,4 +6,6 @@ data/
 decoders/
 plots/
 csv/
+ctdb/*.xlsx
+!ctdb/example_ctdb.xlsx
 config.toml

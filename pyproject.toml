@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "satnogs-telemetry"
-version = "0.2.0"
+version = "1.0.0"
 description = "Headless SatNOGS telemetry downloader, decoder, SQLite store, plotter, and CSV exporter"
 authors = ["Aldo Aguilar <aldo.aguilar@berkeley.edu>"]
 license = "MIT"
@@ -11,13 +11,8 @@ packages = [{ include = "satnogs_telemetry", from = "src" }]
 python = ">=3.11,<3.14"
 requests = ">=2.32,<3.0"
 matplotlib = ">=3.8,<4.0"
-kaitaistruct = ">=0.10,<0.12"
 tomli-w = "^1.2.0"
 python-dotenv = "^1.2.2"
-
-[tool.poetry.group.dev.dependencies]
-pytest = ">=8.0,<9.0"
-ruff = ">=0.11,<0.12"
 
 [tool.poetry.scripts]
 satnogs-telemetry = "satnogs_telemetry.cli:main"
